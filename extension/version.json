@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "data": "2026-03-26",
+  "plugins": {
+    "ExportSheets": "1.0.0",
+    "ExportSchedules": "1.0.0"
+  },
+  "notas": "Versao inicial"
+}
