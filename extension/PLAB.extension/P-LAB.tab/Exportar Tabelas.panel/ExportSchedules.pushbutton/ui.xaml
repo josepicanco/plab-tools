@@ -1,0 +1,488 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Export Schedules P-LAB v2.1"
+        Width="1060" Height="820"
+        MinWidth="860" MinHeight="600"
+        ShowInTaskbar="False"
+        ResizeMode="CanResize"
+        WindowStartupLocation="CenterScreen"
+        Background="#F0F2F5">
+
+    <Window.Resources>
+
+        <Style TargetType="GroupBox">
+            <Setter Property="Margin" Value="0,0,0,8"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="BorderBrush" Value="#CFD8DC"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <Style TargetType="Button">
+            <Setter Property="Margin" Value="4,3"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+        </Style>
+
+        <Style TargetType="TextBox">
+            <Setter Property="Margin" Value="0,3,0,3"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="Padding" Value="6,3"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="BorderBrush" Value="#CFD8DC"/>
+            <Setter Property="FontSize" Value="11"/>
+        </Style>
+
+        <Style TargetType="CheckBox">
+            <Setter Property="Margin" Value="2,5"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+        </Style>
+
+        <!-- Modelo item -->
+        <Style x:Key="ModeloItemStyle" TargetType="ListViewItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="Foreground" Value="#212121"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="BorderBrush" Value="#ECEFF1"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#1565C0"/>
+                    <Setter Property="Foreground" Value="White"/>
+                    <Setter Property="FontWeight" Value="Bold"/>
+                </Trigger>
+                <MultiTrigger>
+                    <MultiTrigger.Conditions>
+                        <Condition Property="IsSelected" Value="True"/>
+                        <Condition Property="IsMouseOver" Value="True"/>
+                    </MultiTrigger.Conditions>
+                    <Setter Property="Background" Value="#0D47A1"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </MultiTrigger>
+                <MultiTrigger>
+                    <MultiTrigger.Conditions>
+                        <Condition Property="IsSelected" Value="False"/>
+                        <Condition Property="IsMouseOver" Value="True"/>
+                    </MultiTrigger.Conditions>
+                    <Setter Property="Background" Value="#BBDEFB"/>
+                </MultiTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Tabela item — cor gerenciada por codigo, sem binding -->
+        <Style x:Key="TabelaItemStyle" TargetType="ListViewItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Padding" Value="4,4"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="BorderBrush" Value="#ECEFF1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+
+        <!-- GridSplitter -->
+        <Style TargetType="GridSplitter">
+            <Setter Property="Background" Value="#CFD8DC"/>
+            <Setter Property="ShowsPreview" Value="True"/>
+        </Style>
+
+    </Window.Resources>
+
+    <!-- Layout raiz: vertical — header / corpo / bottom -->
+    <DockPanel>
+
+        <!-- FOOTER -->
+        <Border DockPanel.Dock="Bottom" Background="#2C3E50" Padding="14,7">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center">
+                    <Run Text="P-LAB Engenharia" Foreground="White" FontWeight="Bold" FontSize="10"/>
+                </TextBlock>
+                <TextBlock Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Run Text="(61) 98206-8746" Foreground="#BDC3C7" FontSize="9"/>
+                    <Run Text="  |  " Foreground="#546E7A" FontSize="9"/>
+                    <Run Text="engpicanco@yahoo.com.br" Foreground="#BDC3C7" FontSize="9"/>
+                </TextBlock>
+                <TextBlock Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Run Text="v2.1.0" Foreground="#78909C" FontSize="9" FontWeight="Bold"/>
+                </TextBlock>
+            </Grid>
+        </Border>
+
+        <!-- BARRA DE BOTOES -->
+        <Border DockPanel.Dock="Bottom" Background="White"
+                BorderBrush="#CFD8DC" BorderThickness="0,1,0,0" Padding="12,7">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="resumo_tb" Grid.Column="0"
+                           Text="Selecione modelos e marque as tabelas para exportar."
+                           FontSize="10" Foreground="#607D8B" VerticalAlignment="Center"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button x:Name="export_btn"
+                            Content="  Exportar Excel  "
+                            Background="#2E7D32" Foreground="White"
+                            FontWeight="Bold" FontSize="12"
+                            Padding="20,7" Margin="4,3"
+                            IsEnabled="False"
+                            Click="btnExportar_Click"/>
+                    <Button x:Name="cancel_btn"
+                            Content="Fechar"
+                            Background="#90A4AE" Foreground="White"
+                            Padding="14,7" Margin="4,3"
+                            Click="btnFechar_Click"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- CONTEUDO: Grid com splitter vertical (corpo | log) -->
+        <Grid>
+            <Grid.RowDefinitions>
+                <!-- Header -->
+                <RowDefinition Height="Auto"/>
+                <!-- Corpo principal -->
+                <RowDefinition Height="*"/>
+                <!-- Splitter horizontal -->
+                <RowDefinition Height="5"/>
+                <!-- Painel de log + progresso (redimensionavel) -->
+                <RowDefinition Height="160" MinHeight="60"/>
+            </Grid.RowDefinitions>
+
+            <!-- HEADER -->
+            <Border Grid.Row="0" Background="#2C3E50"
+                    Padding="16,12" Margin="0,0,0,6">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0">
+                        <TextBlock Text="Export Schedules  —  P-LAB"
+                                   Foreground="White" FontSize="18" FontWeight="Bold"/>
+                        <TextBlock Text="Exportar tabelas de modelos Revit para Excel"
+                                   Foreground="#90A4AE" FontSize="10" Margin="0,3,0,0"/>
+                    </StackPanel>
+                    <TextBlock Grid.Column="1" Text="v2.1.0"
+                               Foreground="#546E7A" FontSize="10" FontWeight="Bold"
+                               VerticalAlignment="Center"/>
+                </Grid>
+            </Border>
+
+            <!-- CORPO: 3 colunas com splitters horizontais -->
+            <Grid Grid.Row="1" Margin="8,0,8,0">
+                <Grid.ColumnDefinitions>
+                    <!-- Config -->
+                    <ColumnDefinition Width="220" MinWidth="160"/>
+                    <ColumnDefinition Width="5"/>
+                    <!-- Modelos -->
+                    <ColumnDefinition Width="220" MinWidth="140"/>
+                    <ColumnDefinition Width="5"/>
+                    <!-- Tabelas -->
+                    <ColumnDefinition Width="*" MinWidth="200"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Splitter col 0|2 -->
+                <GridSplitter Grid.Column="1"
+                              HorizontalAlignment="Stretch"
+                              VerticalAlignment="Stretch"
+                              Width="5" Cursor="SizeWE"/>
+
+                <!-- Splitter col 2|4 -->
+                <GridSplitter Grid.Column="3"
+                              HorizontalAlignment="Stretch"
+                              VerticalAlignment="Stretch"
+                              Width="5" Cursor="SizeWE"/>
+
+                <!-- ====================================================
+                     COL 0 — Configuracoes
+                     ==================================================== -->
+                <ScrollViewer Grid.Column="0"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="0,0,4,0">
+
+                        <GroupBox Header="Destino">
+                            <StackPanel>
+                                <TextBlock Text="Pasta de saida:" FontSize="10"
+                                           Foreground="#607D8B" Margin="0,0,0,3"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="output_path_tb" Grid.Column="0"
+                                             IsReadOnly="True" Background="#ECEFF1"
+                                             Text="Selecione uma pasta..."/>
+                                    <Button x:Name="browse_output_btn" Grid.Column="1"
+                                            Content="..." Background="#3498DB" Foreground="White"
+                                            Padding="10,4" Margin="4,3,0,3"
+                                            Click="btnBrowsePasta_Click"/>
+                                </Grid>
+                                <TextBlock Text="Subpasta:" FontSize="10"
+                                           Foreground="#607D8B" Margin="0,6,0,3"/>
+                                <TextBox x:Name="output_filename_tb" Text="Tabelas_Revit"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="Opcoes de Saida">
+                            <StackPanel>
+                                <CheckBox x:Name="aba_consolidado_cb"
+                                          Content="Aba consolidada" IsChecked="True"/>
+                                <CheckBox x:Name="abas_separadas_cb"
+                                          Content="Folhas separadas" IsChecked="True"/>
+                                <CheckBox x:Name="skip_empty_cb"
+                                          Content="Ignorar tabelas vazias" IsChecked="True"/>
+                                <Separator Margin="0,5"/>
+                                <CheckBox x:Name="mesclar_todos_cb"
+                                          Content="Mesclar todos em um Excel"
+                                          IsChecked="False"
+                                          ToolTip="Nome do arquivo = nome da subpasta"/>
+                                <Separator Margin="0,5"/>
+                                <CheckBox x:Name="log_csv_cb"
+                                          Content="Backup CSV por modelo" IsChecked="False"/>
+                                <Separator Margin="0,5"/>
+                                <CheckBox x:Name="abrir_arquivo_cb"
+                                          Content="Abrir arquivo ao terminar" IsChecked="True"/>
+                                <CheckBox x:Name="abrir_pasta_cb"
+                                          Content="Abrir pasta ao terminar" IsChecked="False"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- ====================================================
+                     COL 2 — Lista de Modelos
+                     ==================================================== -->
+                <Grid Grid.Column="2" Margin="0,0,4,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Background="#37474F"
+                            CornerRadius="4,4,0,0" Padding="10,7">
+                        <TextBlock Text="Modelos Revit"
+                                   Foreground="White" FontSize="11" FontWeight="Bold"/>
+                    </Border>
+
+                    <WrapPanel Grid.Row="1" Background="#ECEFF1" Margin="0">
+                        <Button x:Name="browse_btn" Content="+ Add"
+                                Background="#2196F3" Foreground="White"
+                                Padding="8,4" Margin="4,4,2,4"
+                                Click="btnBrowseModelo_Click"/>
+                        <Button x:Name="remover_modelo_btn" Content="Remover"
+                                Background="#EF5350" Foreground="White"
+                                Padding="8,4" Margin="2,4,2,4"
+                                IsEnabled="False"
+                                Click="btnRemoverModelo_Click"/>
+                        <Button x:Name="carregar_todos_btn" Content="Carregar"
+                                Background="#FF8F00" Foreground="White"
+                                Padding="8,4" Margin="2,4,4,4"
+                                IsEnabled="False"
+                                Click="btnCarregarTodos_Click"/>
+                    </WrapPanel>
+
+                    <Border Grid.Row="2"
+                            BorderBrush="#CFD8DC" BorderThickness="1,0,1,1"
+                            Background="White">
+                        <ListView x:Name="modelos_lv"
+                                  BorderThickness="0" Background="Transparent"
+                                  SelectionMode="Single"
+                                  ItemContainerStyle="{StaticResource ModeloItemStyle}"
+                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                  SelectionChanged="modelosLv_SelectionChanged">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Header="Arquivo" Width="190"
+                                                    DisplayMemberBinding="{Binding Display}"/>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+                    </Border>
+
+                    <Border Grid.Row="3"
+                            Background="#E8F5E9" BorderBrush="#81C784"
+                            BorderThickness="1" Padding="8,5">
+                        <TextBlock x:Name="modelos_info_tb"
+                                   Text="Nenhum modelo adicionado."
+                                   FontSize="10" FontWeight="Bold" Foreground="#2E7D32"/>
+                    </Border>
+                </Grid>
+
+                <!-- ====================================================
+                     COL 4 — Lista de Tabelas com Checkbox
+                     ==================================================== -->
+                <Grid Grid.Column="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Background="#1565C0"
+                            CornerRadius="4,4,0,0" Padding="10,7">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Tabelas do Modelo Selecionado"
+                                       Foreground="White" FontSize="11" FontWeight="Bold"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="Marque as checkboxes para selecionar"
+                                       Foreground="#90CAF9" FontSize="9"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
+
+                    <StackPanel Grid.Row="1" Orientation="Horizontal"
+                                Background="#E3F2FD">
+                        <Button x:Name="select_all_btn" Content="Marcar Todas"
+                                Background="#1976D2" Foreground="White"
+                                Padding="10,4" Margin="4,4,2,4"
+                                IsEnabled="False"
+                                Click="btnSelecionarTodas_Click"/>
+                        <Button x:Name="select_none_btn" Content="Desmarcar Todas"
+                                Background="#90A4AE" Foreground="White"
+                                Padding="10,4" Margin="2,4,4,4"
+                                IsEnabled="False"
+                                Click="btnLimparSelecao_Click"/>
+                    </StackPanel>
+
+                    <Border Grid.Row="2"
+                            BorderBrush="#CFD8DC" BorderThickness="1,0,1,1"
+                            Background="White">
+                        <ListView x:Name="schedules_lv"
+                                  BorderThickness="0" Background="Transparent"
+                                  SelectionMode="Single"
+                                  ItemContainerStyle="{StaticResource TabelaItemStyle}"
+                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                  MouseLeftButtonUp="schedulesLv_MouseLeftButtonUp">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Header="  " Width="36"/>
+                                    <GridViewColumn Header="Nome da Tabela" Width="420"/>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+                    </Border>
+
+                    <Border Grid.Row="3"
+                            Background="#E3F2FD" BorderBrush="#2196F3"
+                            BorderThickness="1" Padding="8,5">
+                        <TextBlock x:Name="selection_info_tb"
+                                   Text="Selecione um modelo para ver as tabelas."
+                                   FontSize="10" FontWeight="Bold" Foreground="#1565C0"/>
+                    </Border>
+                </Grid>
+
+            </Grid>
+
+            <!-- SPLITTER HORIZONTAL (corpo | log) -->
+            <GridSplitter Grid.Row="2"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          Height="5" Cursor="SizeNS"
+                          Background="#B0BEC5"/>
+
+            <!-- PAINEL INFERIOR: progresso + log (redimensionavel) -->
+            <Grid Grid.Row="3" Margin="8,0,8,4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Progresso -->
+                <Border Grid.Row="0" Padding="10,6" Margin="0,0,0,4"
+                        Background="White" BorderBrush="#CFD8DC"
+                        BorderThickness="1" CornerRadius="4">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,3">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="progress_label_tb" Grid.Column="0"
+                                       Text="Aguardando..." FontSize="10" Foreground="#546E7A"/>
+                            <TextBlock x:Name="progress_pct_tb" Grid.Column="1"
+                                       FontSize="10" FontWeight="Bold" Foreground="#37474F"/>
+                        </Grid>
+                        <ProgressBar x:Name="progress_bar" Height="8"
+                                     Minimum="0" Maximum="100" Value="0"
+                                     Foreground="#4CAF50" Background="#ECEFF1"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Log -->
+                <Border Grid.Row="1"
+                        BorderBrush="#CFD8DC" BorderThickness="1"
+                        CornerRadius="4" Background="White">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <Border Grid.Row="0" Background="#37474F"
+                                CornerRadius="4,4,0,0" Padding="10,5">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Button Grid.Column="0"
+                                        Background="Transparent" BorderThickness="0"
+                                        Padding="0" Margin="0" Cursor="Hand"
+                                        Click="btnToggleLog_Click">
+                                    <TextBlock x:Name="log_toggle_tb"
+                                               Text="v  Log de Exportacao / Debug"
+                                               Foreground="White" FontSize="10" FontWeight="Bold"/>
+                                </Button>
+                                <TextBlock x:Name="log_summary_tb" Grid.Column="1"
+                                           Foreground="#90A4AE" FontSize="9"
+                                           VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                <Button x:Name="copy_log_btn" Grid.Column="2"
+                                        Content="Copiar" Background="#546E7A" Foreground="White"
+                                        Padding="8,2" Margin="0,0,4,0" FontSize="10"
+                                        Click="btnCopyLog_Click"/>
+                                <Button x:Name="clear_log_btn" Grid.Column="3"
+                                        Content="Limpar" Background="#546E7A" Foreground="White"
+                                        Padding="8,2" Margin="0" FontSize="10"
+                                        Click="btnClearLog_Click"/>
+                            </Grid>
+                        </Border>
+                        <Border x:Name="log_content_border" Grid.Row="1" Padding="6">
+                            <ScrollViewer x:Name="log_scroll"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Auto">
+                                <TextBlock x:Name="log_tb"
+                                           FontFamily="Consolas" FontSize="10"
+                                           Foreground="#263238" TextWrapping="NoWrap"
+                                           Text="[--:--:--] Sistema iniciado."/>
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+                </Border>
+
+            </Grid>
+
+        </Grid>
+    </DockPanel>
+</Window>
