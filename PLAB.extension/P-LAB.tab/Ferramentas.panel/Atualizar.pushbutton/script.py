@@ -16,9 +16,12 @@ import tempfile
 import zipfile
 
 # Adiciona Python 3 ao path para usar requests
-PYTHON3_PATH = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Python314", "Lib", "site-packages")
-if PYTHON3_PATH not in sys.path and os.path.exists(PYTHON3_PATH):
-    sys.path.insert(0, PYTHON3_PATH)
+# Adiciona qualquer Python 3 instalado ao path
+for _ver in ["Python313", "Python312", "Python311", "Python314"]:
+    _p = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", _ver, "Lib", "site-packages")
+    if os.path.exists(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
+        break
 
 # pyRevit imports
 from pyrevit import forms, script
@@ -27,7 +30,7 @@ logger = script.get_logger()
 
 # ── CONFIGURACAO ─────────────────────────────────────────────────────────────
 # SUBSTITUA pelo link do seu repositorio quando criar
-GITHUB_USER    = "SEU_USUARIO_GITHUB"
+GITHUB_USER    = "josepicanco"
 GITHUB_REPO    = "plab-tools"
 GITHUB_BRANCH  = "main"
 
@@ -43,8 +46,8 @@ PANEL_DIR      = os.path.dirname(PUSHBUTTON_DIR)
 TAB_DIR        = os.path.dirname(PANEL_DIR)
 EXTENSION_DIR  = os.path.dirname(TAB_DIR)
 
-VERSION_FILE_LOCAL  = os.path.join(EXTENSION_DIR, "..", "version.json")
-VERSION_FILE_LOCAL  = os.path.normpath(VERSION_FILE_LOCAL)
+# version.json fica em Extensionsersion.json (um nivel acima de PLAB.extension)
+VERSION_FILE_LOCAL = os.path.normpath(os.path.join(EXTENSION_DIR, "..", "version.json"))
 
 # ── FUNCOES AUXILIARES ────────────────────────────────────────────────────────
 
