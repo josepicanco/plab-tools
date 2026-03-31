@@ -25,25 +25,32 @@ from pyrevit import HOST_APP, DB
 from pyrevit.framework import wpf
 
 # -----------------------------------------------------------------------------
-# FAILURE PREPROCESSOR
+# FAILURE PREPROCESSOR — coleta avisos para o log, suprime silenciosamente
 # -----------------------------------------------------------------------------
 class _IgnoreAllFailures(DB.IFailuresPreprocessor):
     def PreprocessFailures(self, failuresAccessor):
         for f in failuresAccessor.GetFailureMessages():
-            try:    failuresAccessor.DeleteWarning(f)
-            except: pass
+            try:
+                sev = f.GetSeverity()
+                if sev == DB.FailureSeverity.Warning:
+                    failuresAccessor.DeleteWarning(f)
+                elif sev == DB.FailureSeverity.Error:
+                    resolucoes = f.GetApplicableResolutionTypes()
+                    if resolucoes.Count > 0:
+                        f.SetCurrentResolutionType(resolucoes[0])
+                        failuresAccessor.ResolveFailure(f)
+            except Exception:
+                pass
         return DB.FailureProcessingResult.Continue
 
 # -----------------------------------------------------------------------------
-# MODELOS DE DADOS — sem INotifyPropertyChanged (nao funciona bem no IronPython)
+# MODELOS DE DADOS
 # -----------------------------------------------------------------------------
 class ScheduleItem(object):
-    """ViewSchedule simples. O estado do checkbox e gerenciado pela UI."""
     def __init__(self, name, element_id):
-        self.Name      = name
-        self.ElementId = element_id
-        self.Selecionada = False   # controlado pelo script, nao por binding
-
+        self.Name        = name
+        self.ElementId   = element_id
+        self.Selecionada = False
 
 class ModeloItem(object):
     def __init__(self, caminho):
@@ -55,7 +62,6 @@ class ModeloItem(object):
     def tabelas_selecionadas(self):
         return [t for t in self.Tabelas if t.Selecionada]
 
-
 # -----------------------------------------------------------------------------
 # JANELA PRINCIPAL
 # -----------------------------------------------------------------------------
@@ -65,12 +71,12 @@ class ExportSchedulesUI(Window):
         xaml_path = os.path.join(os.path.dirname(__file__), 'ui.xaml')
         wpf.LoadComponent(self, xaml_path)
 
-        self.app           = HOST_APP.app
-        self.pasta_destino = ''
-        self._modelos      = []
-        self._modelo_atual = None
-        self._log_lines    = []
-        self._ultimo_chk_idx = None   # indice do ultimo checkbox clicado (Shift+Click)
+        self.app             = HOST_APP.app
+        self.pasta_destino   = ''
+        self._modelos        = []
+        self._modelo_atual   = None
+        self._log_lines      = []
+        self._ultimo_chk_idx = None
 
         self._log("OK", "Pronto. Selecione um ou mais modelos Revit.")
 
@@ -104,7 +110,7 @@ class ExportSchedulesUI(Window):
                                System.Action(lambda: None))
 
     def _atualizar_contador_modelos(self):
-        total     = len(self._modelos)
+        total      = len(self._modelos)
         carregados = sum(1 for m in self._modelos if m.Tabelas)
         self.modelos_info_tb.Text = "{} modelo(s) | {} carregado(s)".format(
             total, carregados)
@@ -115,9 +121,8 @@ class ExportSchedulesUI(Window):
         if not self._modelo_atual:
             self.selection_info_tb.Text = "Selecione um modelo para ver as tabelas."
             return
-        total = len(self._modelo_atual.Tabelas)
-        sel   = len(self._modelo_atual.tabelas_selecionadas())
-        # Total geral selecionado em todos os modelos
+        total       = len(self._modelo_atual.Tabelas)
+        sel         = len(self._modelo_atual.tabelas_selecionadas())
         total_geral = sum(len(m.tabelas_selecionadas()) for m in self._modelos)
         self.selection_info_tb.Text = \
             "{}/{} neste modelo  |  {} total selecionadas".format(
@@ -131,6 +136,45 @@ class ExportSchedulesUI(Window):
     def _refresh_modelos_lv(self):
         self.modelos_lv.ItemsSource = None
         self.modelos_lv.ItemsSource = self._modelos
+
+    # -------------------------------------------------------------------------
+    # COM SEGURO — todas as chamadas via InvokeMember
+    # Compativel com ApplicationClass e __ComObject (qualquer maquina)
+    # -------------------------------------------------------------------------
+    def _cget(self, obj, prop, args=None):
+        """GET de propriedade COM."""
+        return obj.GetType().InvokeMember(
+            prop,
+            System.Reflection.BindingFlags.GetProperty,
+            None, obj,
+            System.Array[System.Object](args if args else [])
+        )
+
+    def _cset(self, obj, prop, val):
+        """SET de propriedade COM."""
+        try:
+            obj.GetType().InvokeMember(
+                prop,
+                System.Reflection.BindingFlags.SetProperty,
+                None, obj,
+                System.Array[System.Object]([val])
+            )
+        except Exception:
+            pass  # propriedades visuais nao sao criticas
+
+    def _ccall(self, obj, method, args=None):
+        """Chamada de metodo COM."""
+        return obj.GetType().InvokeMember(
+            method,
+            System.Reflection.BindingFlags.InvokeMethod,
+            None, obj,
+            System.Array[System.Object](args if args else [])
+        )
+
+    def _excel_silencioso(self, excel):
+        self._cset(excel, "Visible",        False)
+        self._cset(excel, "DisplayAlerts",  False)
+        self._cset(excel, "ScreenUpdating", False)
 
     # -------------------------------------------------------------------------
     # BROWSE MODELOS
@@ -200,8 +244,9 @@ class ExportSchedulesUI(Window):
     def _carregar_modelo(self, modelo):
         doc_temp  = None
         temp_path = None
+        avisos    = []
         try:
-            doc_temp, temp_path = self._abrir_documento(modelo.Caminho)
+            doc_temp, temp_path = self._abrir_documento(modelo.Caminho, avisos)
             collector = DB.FilteredElementCollector(doc_temp).OfClass(DB.ViewSchedule)
             tabelas = []
             for sv in collector:
@@ -211,8 +256,17 @@ class ExportSchedulesUI(Window):
                         and sv.IsTitleblockRevisionSchedule:
                     continue
                 tabelas.append(ScheduleItem(sv.Name, sv.Id))
+
+            # ORDENACAO ALFABETICA
+            tabelas.sort(key=lambda t: t.Name.lower())
+
             modelo.Tabelas = tabelas
             self._log("OK", "'{}' — {} tabelas.".format(modelo.Nome, len(tabelas)))
+
+            # Registra avisos suprimidos apenas para registro no log
+            for av in avisos:
+                self._log("WARN", "[Revit] {}".format(av))
+
         except Exception as ex:
             self._log("ERROR", "Falha '{}': {}".format(modelo.Nome, str(ex)))
         finally:
@@ -224,7 +278,7 @@ class ExportSchedulesUI(Window):
                 except: pass
         self._refresh_modelos_lv()
 
-    def _abrir_documento(self, caminho_rvt):
+    def _abrir_documento(self, caminho_rvt, avisos_out=None):
         pasta_temp   = tempfile.gettempdir()
         nome_base    = os.path.splitext(os.path.basename(caminho_rvt))[0]
         caminho_temp = os.path.join(pasta_temp,
@@ -234,13 +288,36 @@ class ExportSchedulesUI(Window):
         open_opts = DB.OpenOptions()
         open_opts.DetachFromCentralOption = \
             DB.DetachFromCentralOption.DetachAndPreserveWorksets
+
+        # Preprocessor que coleta texto dos avisos para o log
+        class _ColetarAvisos(DB.IFailuresPreprocessor):
+            def __init__(self, out):
+                self._out = out if out is not None else []
+            def PreprocessFailures(self, failuresAccessor):
+                for f in failuresAccessor.GetFailureMessages():
+                    try:
+                        sev = f.GetSeverity()
+                        if sev == DB.FailureSeverity.Warning:
+                            try:    self._out.append(f.GetDescriptionText())
+                            except: pass
+                            failuresAccessor.DeleteWarning(f)
+                        elif sev == DB.FailureSeverity.Error:
+                            resolucoes = f.GetApplicableResolutionTypes()
+                            if resolucoes.Count > 0:
+                                f.SetCurrentResolutionType(resolucoes[0])
+                                failuresAccessor.ResolveFailure(f)
+                    except Exception:
+                        pass
+                return DB.FailureProcessingResult.Continue
+
         try:
             fho = open_opts.GetFailureHandlingOptions()
-            fho.SetFailuresPreprocessor(_IgnoreAllFailures())
+            fho.SetFailuresPreprocessor(_ColetarAvisos(avisos_out))
             fho.SetClearAfterRollback(True)
             open_opts.SetFailureHandlingOptions(fho)
         except Exception:
             pass
+
         doc = self.app.OpenDocumentFile(path_temp, open_opts)
         try:
             self.Activate()
@@ -250,7 +327,7 @@ class ExportSchedulesUI(Window):
         return doc, caminho_temp
 
     # -------------------------------------------------------------------------
-    # SELECAO DE MODELO — popula lista de tabelas com checkboxes manuais
+    # SELECAO DE MODELO
     # -------------------------------------------------------------------------
     def modelosLv_SelectionChanged(self, sender, args):
         sel = self.modelos_lv.SelectedItem
@@ -262,8 +339,8 @@ class ExportSchedulesUI(Window):
             self._atualizar_contador_tabelas()
             return
 
-        self._modelo_atual = sel
-        self._ultimo_chk_idx = None   # resetar referencia de Shift+Click ao trocar modelo
+        self._modelo_atual   = sel
+        self._ultimo_chk_idx = None
 
         if not sel.Tabelas:
             self._log("INFO", "Carregando '{}'...".format(sel.Nome))
@@ -280,11 +357,6 @@ class ExportSchedulesUI(Window):
         self._verificar_exportar_habilitado()
 
     def _popular_tabelas_lv(self, modelo):
-        """
-        Reconstroi o ListView de tabelas usando CheckBox + TextBlock criados
-        por codigo — sem DataTemplate nem binding, evitando o bug do IronPython
-        com INotifyPropertyChanged.
-        """
         from System.Windows.Controls import (
             ListViewItem, CheckBox as WpfCheckBox, StackPanel, TextBlock,
             Orientation)
@@ -293,54 +365,45 @@ class ExportSchedulesUI(Window):
         self.schedules_lv.Items.Clear()
 
         for tab in modelo.Tabelas:
-            # Checkbox
             chk = WpfCheckBox()
-            chk.IsChecked   = tab.Selecionada
-            chk.Margin      = Thickness(4, 0, 8, 0)
+            chk.IsChecked         = tab.Selecionada
+            chk.Margin            = Thickness(4, 0, 8, 0)
             chk.VerticalAlignment = System.Windows.VerticalAlignment.Center
-            # Guardar referencia ao ScheduleItem no Tag
-            chk.Tag = tab
-            chk.Click += self._chk_tabela_click
+            chk.Tag               = tab
+            chk.Click            += self._chk_tabela_click
 
-            # Texto
             txt = TextBlock()
-            txt.Text     = tab.Name
-            txt.FontSize = 11
+            txt.Text             = tab.Name
+            txt.FontSize         = 11
             txt.VerticalAlignment = System.Windows.VerticalAlignment.Center
 
-            # Linha horizontal
             sp = StackPanel()
             sp.Orientation = Orientation.Horizontal
             sp.Children.Add(chk)
             sp.Children.Add(txt)
 
-            lvi = ListViewItem()
+            lvi         = ListViewItem()
             lvi.Content = sp
             lvi.Tag     = tab
             self._aplicar_cor_linha(lvi, tab.Selecionada)
             self.schedules_lv.Items.Add(lvi)
 
     def _aplicar_cor_linha(self, lvi, selecionada):
-        from System.Windows.Media import SolidColorBrush, Color
         if selecionada:
-            lvi.Background = SolidColorBrush(Color.FromRgb(13, 71, 161))   # #0D47A1
+            lvi.Background = SolidColorBrush(Color.FromRgb(13, 71, 161))
             lvi.Foreground = SolidColorBrush(Color.FromRgb(255, 255, 255))
         else:
             lvi.Background = SolidColorBrush(Color.FromRgb(255, 255, 255))
             lvi.Foreground = SolidColorBrush(Color.FromRgb(33, 33, 33))
 
     def _chk_tabela_click(self, sender, args):
-        """
-        Clique no checkbox com suporte a Shift+Click para selecionar intervalo.
-        """
         from System.Windows.Input import Keyboard, ModifierKeys
 
-        chk = sender
-        tab = chk.Tag
-
-        # Descobrir o indice deste item na lista
+        chk       = sender
+        tab       = chk.Tag
         idx_atual = None
-        items = list(self.schedules_lv.Items)
+        items     = list(self.schedules_lv.Items)
+
         for i, lvi in enumerate(items):
             if lvi.Tag is tab:
                 idx_atual = i
@@ -352,21 +415,17 @@ class ExportSchedulesUI(Window):
         shift_pressionado = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift
 
         if shift_pressionado and self._ultimo_chk_idx is not None:
-            # Selecionar/desselecionar intervalo entre ultimo clique e atual
-            # O estado alvo é o estado atual do checkbox clicado
             estado_alvo = (chk.IsChecked == True)
             inicio = min(self._ultimo_chk_idx, idx_atual)
             fim    = max(self._ultimo_chk_idx, idx_atual)
             for i in range(inicio, fim + 1):
-                lvi_i  = items[i]
-                tab_i  = lvi_i.Tag
-                sp_i   = lvi_i.Content
-                chk_i  = sp_i.Children[0]
+                lvi_i       = items[i]
+                tab_i       = lvi_i.Tag
+                chk_i       = lvi_i.Content.Children[0]
                 tab_i.Selecionada = estado_alvo
                 chk_i.IsChecked   = estado_alvo
                 self._aplicar_cor_linha(lvi_i, estado_alvo)
         else:
-            # Clique simples — apenas este item
             tab.Selecionada = (chk.IsChecked == True)
             parent = chk.Parent
             if parent is not None:
@@ -378,7 +437,6 @@ class ExportSchedulesUI(Window):
         self._atualizar_contador_tabelas()
         self._verificar_exportar_habilitado()
 
-    # Manter compatibilidade — click na linha tb nao e necessario agora
     def schedulesLv_MouseLeftButtonUp(self, sender, args):
         pass
 
@@ -388,17 +446,24 @@ class ExportSchedulesUI(Window):
     def btnSelecionarTodas_Click(self, sender, args):
         if not self._modelo_atual:
             return
+        # Carrega automaticamente se necessario
+        if not self._modelo_atual.Tabelas:
+            self._log("INFO", "Carregando '{}' para selecionar tabelas...".format(
+                self._modelo_atual.Nome))
+            self._set_progress(20, "Carregando {}...".format(self._modelo_atual.Nome), "")
+            self._carregar_modelo(self._modelo_atual)
+            self._set_progress(100, "Carregado.", "100%")
+            self._atualizar_contador_modelos()
+            self._popular_tabelas_lv(self._modelo_atual)
         for tab in self._modelo_atual.Tabelas:
             tab.Selecionada = True
-        # Atualizar checkboxes e cores de todas as linhas visiveis
         for lvi in self.schedules_lv.Items:
-            tab = lvi.Tag
-            sp  = lvi.Content
-            chk = sp.Children[0]
-            chk.IsChecked = True
+            lvi.Content.Children[0].IsChecked = True
             self._aplicar_cor_linha(lvi, True)
         self._atualizar_contador_tabelas()
         self._verificar_exportar_habilitado()
+        self._log("INFO", "Todas as tabelas de '{}' selecionadas.".format(
+            self._modelo_atual.Nome))
 
     def btnLimparSelecao_Click(self, sender, args):
         if not self._modelo_atual:
@@ -406,13 +471,11 @@ class ExportSchedulesUI(Window):
         for tab in self._modelo_atual.Tabelas:
             tab.Selecionada = False
         for lvi in self.schedules_lv.Items:
-            tab = lvi.Tag
-            sp  = lvi.Content
-            chk = sp.Children[0]
-            chk.IsChecked = False
+            lvi.Content.Children[0].IsChecked = False
             self._aplicar_cor_linha(lvi, False)
         self._atualizar_contador_tabelas()
         self._verificar_exportar_habilitado()
+        self._log("INFO", "Selecao limpa.")
 
     # -------------------------------------------------------------------------
     # EXPORTAR
@@ -434,8 +497,8 @@ class ExportSchedulesUI(Window):
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
 
-        arquivos_gerados  = []
-        total_modelos     = len(modelos_para_exportar)
+        arquivos_gerados = []
+        total_modelos    = len(modelos_para_exportar)
 
         try:
             for idx_m, modelo in enumerate(modelos_para_exportar, start=1):
@@ -591,79 +654,158 @@ class ExportSchedulesUI(Window):
             raise Exception("Excel nao encontrado.")
 
         excel = System.Activator.CreateInstance(excel_type)
-        excel.Visible = excel.DisplayAlerts = excel.ScreenUpdating = False
+        self._excel_silencioso(excel)
         try:
-            wb = excel.Workbooks.Add()
-            while wb.Sheets.Count > 1:
-                wb.Sheets(wb.Sheets.Count).Delete()
+            workbooks = self._cget(excel, "Workbooks")
+            self._log("INFO", "COM: Workbooks obtido OK")
+            wb        = self._ccall(workbooks, "Add")
+            self._log("INFO", "COM: Workbook criado OK")
+            sheets    = self._cget(wb, "Sheets")
+            self._log("INFO", "COM: Sheets obtido OK")
+
+            # Remove abas padrao ate sobrar 1
+            sheet_count = self._cget(sheets, "Count")
+            self._log("INFO", "COM: Count={} OK".format(sheet_count))
+            while sheet_count > 1:
+                last = self._cget(sheets, "Item", [sheet_count])
+                self._ccall(last, "Delete")
+                sheet_count = self._cget(sheets, "Count")
+            self._log("INFO", "COM: abas limpas OK")
+
             if fazer_consolidado:
+                self._log("INFO", "COM: iniciando consolidado")
                 self._escrever_consolidado(wb, dados)
+                self._log("INFO", "COM: consolidado OK")
             if fazer_separadas:
+                self._log("INFO", "COM: iniciando abas separadas")
                 for nome, linhas in dados:
                     self._escrever_aba(wb, nome, linhas)
-            wb.SaveAs(xlsx_path, 51)
-            wb.Close(False)
+                self._log("INFO", "COM: abas separadas OK")
+
+            self._log("INFO", "COM: salvando {}".format(xlsx_path))
+            self._ccall(wb, "SaveAs", [xlsx_path, 51])
+            self._log("INFO", "COM: salvo OK")
+            self._ccall(wb, "Close",  [False])
+        except Exception as ex:
+            import traceback
+            self._log("ERROR", "COM inner: {}".format(str(ex)))
+            self._log("ERROR", "COM trace: {}".format(traceback.format_exc()))
+            raise
         finally:
-            try:    excel.Quit()
+            try:    self._ccall(excel, "Quit")
             except: pass
             try:    Interop.Marshal.ReleaseComObject(excel)
             except: pass
 
+    def _cell_addr(self, row, col):
+        """Converte linha/coluna para endereco Excel (ex: 1,3 -> 'C1')."""
+        letters = ""
+        while col > 0:
+            col, rem = divmod(col - 1, 26)
+            letters  = chr(65 + rem) + letters
+        return "{}{}".format(letters, row)
+
     def _escrever_consolidado(self, wb, dados):
-        ws = wb.Sheets(1)
-        ws.Name = "CONSOLIDADO"
+        sheets = self._cget(wb, "Sheets")
+        ws     = self._cget(sheets, "Item", [1])
+        self._cset(ws, "Name", "CONSOLIDADO")
         linha = 1
         for nome, linhas in dados:
             if not linhas:
                 continue
             n_cols = max(len(r) for r in linhas)
-            ws.Cells(linha, 1).Value2 = nome
-            tr = ws.Range(ws.Cells(linha, 1), ws.Cells(linha, max(n_cols, 1)))
-            tr.Merge()
-            tr.Font.Bold = True; tr.Font.Size = 11
-            tr.Interior.Color = 0x503C2C; tr.Font.Color = 0xFFFFFF
-            tr.HorizontalAlignment = -4108
+            cells  = self._cget(ws, "Cells")
+
+            # Titulo da tabela
+            self._cset(self._cget(cells, "Item", [linha, 1]), "Value2", nome)
+            addr_tr = "{}:{}".format(
+                self._cell_addr(linha, 1),
+                self._cell_addr(linha, max(n_cols, 1)))
+            tr = self._cget(ws, "Range", [addr_tr])
+            self._ccall(tr, "Merge")
+            self._cset(self._cget(tr, "Font"), "Bold",  True)
+            self._cset(self._cget(tr, "Font"), "Size",  11)
+            self._cset(self._cget(tr, "Interior"), "Color", 0x503C2C)
+            self._cset(self._cget(tr, "Font"), "Color", 0xFFFFFF)
+            self._cset(tr, "HorizontalAlignment", -4108)
             linha += 1
+
+            # Cabecalho
             for c_idx, val in enumerate(linhas[0], 1):
-                ws.Cells(linha, c_idx).Value2 = val
-            hr = ws.Range(ws.Cells(linha, 1), ws.Cells(linha, len(linhas[0])))
-            hr.Font.Bold = True; hr.Interior.Color = 0xD0E4F7
-            hr.HorizontalAlignment = -4108
+                self._cset(
+                    self._cget(cells, "Item", [linha, c_idx]), "Value2", val)
+            addr_hr = "{}:{}".format(
+                self._cell_addr(linha, 1),
+                self._cell_addr(linha, len(linhas[0])))
+            hr = self._cget(ws, "Range", [addr_hr])
+            self._cset(self._cget(hr, "Font"), "Bold", True)
+            self._cset(self._cget(hr, "Interior"), "Color", 0xD0E4F7)
+            self._cset(hr, "HorizontalAlignment", -4108)
             linha += 1
+
+            # Dados
             for row in linhas[1:]:
                 for c_idx, val in enumerate(row, 1):
-                    ws.Cells(linha, c_idx).Value2 = val
+                    self._cset(
+                        self._cget(cells, "Item", [linha, c_idx]), "Value2", val)
                 linha += 1
             linha += 1
-        ws.Columns.AutoFit()
+
+        cols = self._cget(ws, "Columns")
+        self._ccall(cols, "AutoFit")
 
     def _escrever_aba(self, wb, nome, linhas):
         if not linhas:
             return
+        sheets = self._cget(wb, "Sheets")
+
         aba = nome
         for ch in "/\\?*:[]":
             aba = aba.replace(ch, "-")
-        base = aba[:27]; final = base; n = 2
-        existentes = [wb.Sheets(k).Name for k in range(1, wb.Sheets.Count + 1)]
+        base  = aba[:27]
+        final = base
+        n     = 2
+        count = self._cget(sheets, "Count")
+        existentes = [
+            self._cget(self._cget(sheets, "Item", [k]), "Name")
+            for k in range(1, count + 1)
+        ]
         while final in existentes:
-            suf = "({})".format(n); final = base[:31-len(suf)] + suf; n += 1
-        ws = wb.Sheets.Add(System.Reflection.Missing.Value,
-                           wb.Sheets(wb.Sheets.Count))
-        ws.Name = final
+            suf   = "({})".format(n)
+            final = base[:31 - len(suf)] + suf
+            n    += 1
+
+        last = self._cget(sheets, "Item", [self._cget(sheets, "Count")])
+        ws   = self._ccall(sheets, "Add",
+                           [System.Reflection.Missing.Value, last,
+                            System.Reflection.Missing.Value,
+                            System.Reflection.Missing.Value])
+        self._cset(ws, "Name", final)
+
+        cells = self._cget(ws, "Cells")
         for r_idx, row in enumerate(linhas, 1):
             for c_idx, val in enumerate(row, 1):
-                ws.Cells(r_idx, c_idx).Value2 = val
+                self._cset(
+                    self._cget(cells, "Item", [r_idx, c_idx]), "Value2", val)
+
         if linhas:
-            hr = ws.Range(ws.Cells(1,1), ws.Cells(1, len(linhas[0])))
-            hr.Font.Bold = True; hr.Interior.Color = 0xD0E4F7
-            hr.HorizontalAlignment = -4108
-        ws.Columns.AutoFit()
+            addr_hr = "{}:{}".format(
+                self._cell_addr(1, 1),
+                self._cell_addr(1, len(linhas[0])))
+            hr = self._cget(ws, "Range", [addr_hr])
+            self._cset(self._cget(hr, "Font"), "Bold", True)
+            self._cset(self._cget(hr, "Interior"), "Color", 0xD0E4F7)
+            self._cset(hr, "HorizontalAlignment", -4108)
+
+        cols = self._cget(ws, "Columns")
+        self._ccall(cols, "AutoFit")
 
     # -------------------------------------------------------------------------
     # MESCLAR EXCELS
     # -------------------------------------------------------------------------
     def _mesclar_excels(self, arquivos, out_dir, nome_pasta):
         import System.Runtime.InteropServices as Interop
+
         nome_final = nome_pasta
         for ch in "/\\?*:[]<>|":
             nome_final = nome_final.replace(ch, "-")
@@ -674,49 +816,67 @@ class ExportSchedulesUI(Window):
             raise Exception("Excel nao encontrado para mesclagem.")
 
         excel = System.Activator.CreateInstance(excel_type)
-        excel.Visible = excel.DisplayAlerts = excel.ScreenUpdating = False
+        self._excel_silencioso(excel)
         self._log("INFO", "Mesclando {} arquivo(s)...".format(len(arquivos)))
         try:
-            wb_dest = excel.Workbooks.Add()
-            while wb_dest.Sheets.Count > 1:
-                wb_dest.Sheets(wb_dest.Sheets.Count).Delete()
+            workbooks = self._cget(excel, "Workbooks")
+            wb_dest   = self._ccall(workbooks, "Add")
+            sheets_d  = self._cget(wb_dest, "Sheets")
+
+            while self._cget(sheets_d, "Count") > 1:
+                last = self._cget(sheets_d, "Item",
+                                  [self._cget(sheets_d, "Count")])
+                self._ccall(last, "Delete")
+
             for xlsx_path in arquivos:
                 nome_modelo = os.path.splitext(os.path.basename(xlsx_path))[0]
                 try:
-                    wb_src = excel.Workbooks.Open(xlsx_path)
-                    for k in range(1, wb_src.Sheets.Count + 1):
-                        ws_src   = wb_src.Sheets(k)
-                        nome_aba = ws_src.Name   # ex: "CONSOLIDADO" ou nome da tabela
+                    wb_src   = self._ccall(workbooks, "Open", [xlsx_path])
+                    sheets_s = self._cget(wb_src, "Sheets")
+                    count_s  = self._cget(sheets_s, "Count")
 
-                        # Nome final = NomeModelo_NomeAba, truncado para 31 chars
-                        # Reservar espaco suficiente para o sufixo de unicidade "(N)"
-                        candidato = "{}_{}".format(nome_modelo, nome_aba)
-                        candidato = candidato[:27]   # 27 + len("(99)") = 31
+                    for k in range(1, count_s + 1):
+                        ws_src   = self._cget(sheets_s, "Item", [k])
+                        nome_aba = self._cget(ws_src, "Name")
 
-                        # Garantir unicidade
+                        candidato = "{}_{}".format(nome_modelo, nome_aba)[:27]
                         n = 2
-                        existentes = [wb_dest.Sheets(j).Name
-                                      for j in range(1, wb_dest.Sheets.Count + 1)]
+                        sheets_d  = self._cget(wb_dest, "Sheets")
+                        existentes = [
+                            self._cget(self._cget(sheets_d, "Item", [j]), "Name")
+                            for j in range(1, self._cget(sheets_d, "Count") + 1)
+                        ]
                         aba_final = candidato
                         while aba_final in existentes:
                             suf       = "({})".format(n)
                             aba_final = candidato[:31 - len(suf)] + suf
-                            n += 1
+                            n        += 1
 
-                        ws_src.Copy(System.Reflection.Missing.Value,
-                                    wb_dest.Sheets(wb_dest.Sheets.Count))
-                        wb_dest.Sheets(wb_dest.Sheets.Count).Name = aba_final
-                    wb_src.Close(False)
+                        last_dest = self._cget(sheets_d, "Item",
+                                               [self._cget(sheets_d, "Count")])
+                        self._ccall(ws_src, "Copy",
+                                    [System.Reflection.Missing.Value, last_dest])
+
+                        sheets_d  = self._cget(wb_dest, "Sheets")
+                        nova_aba  = self._cget(sheets_d, "Item",
+                                               [self._cget(sheets_d, "Count")])
+                        self._cset(nova_aba, "Name", aba_final)
+
+                    self._ccall(wb_src, "Close", [False])
                 except Exception as ex:
                     self._log("ERROR", "Falha mesclar '{}': {}".format(
                         nome_modelo, str(ex)))
-            if wb_dest.Sheets.Count > 1:
-                wb_dest.Sheets(1).Delete()
-            wb_dest.SaveAs(xlsx_final, 51)
-            wb_dest.Close(False)
+
+            sheets_d = self._cget(wb_dest, "Sheets")
+            if self._cget(sheets_d, "Count") > 1:
+                primeira = self._cget(sheets_d, "Item", [1])
+                self._ccall(primeira, "Delete")
+
+            self._ccall(wb_dest, "SaveAs", [xlsx_final, 51])
+            self._ccall(wb_dest, "Close",  [False])
             self._log("OK", "Consolidado: {}".format(os.path.basename(xlsx_final)))
         finally:
-            try:    excel.Quit()
+            try:    self._ccall(excel, "Quit")
             except: pass
             try:    Interop.Marshal.ReleaseComObject(excel)
             except: pass
