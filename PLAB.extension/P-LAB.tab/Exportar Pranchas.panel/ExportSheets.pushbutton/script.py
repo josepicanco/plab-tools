@@ -2,10 +2,35 @@
 #pylint: disable=import-error,invalid-name,broad-except
 """
 ================================================================
-             EXPORTSHEETS P-LAB - VERSAO 2.3.0
+             EXPORTSHEETS P-LAB - VERSAO 2.4.0
 ================================================================
 
 HISTORICO:
+   v2.4.0 (2026-08-10):
+   - REESCRITO: "Vincular imagens ao DWG" nunca funcionou. A versao antiga
+     dirigia o AutoCAD com script LISP + area de transferencia, e tinha tres
+     bloqueios: (1) o ssget do LISP nao enxerga dentro de definicoes de
+     bloco, que e exatamente onde o Revit poe o carimbo; (2) objeto OLE nao
+     pode ser aninhado em bloco; (3) o clipboard e instavel em processo de
+     segundo plano. Alem disso o log nunca era gravado (bug de codigo morto),
+     entao a funcao podia reportar sucesso sem ter feito nada.
+     Agora quem faz o trabalho e o plab-dwg-embed.exe (C# + ACadSharp), que
+     grava o objeto OLE direto no arquivo. NAO exige AutoCAD instalado.
+   - CORRIGIDO: perfil salvo nao restaurava a composicao do nome.
+     apply_config ignorava custom_fields e separator; agora tambem
+     restaura qualidade, cores, margens e configuracao DWG
+   - ADICIONADO: texto fixo como item posicionavel da sequencia do
+     nome (token TXT:) - pode ir a qualquer posicao, nao so nas pontas
+   - ADICIONADO: separador avulso por posicao (token SEP:)
+   - ADICIONADO: separador de campo livre e opcao de nao usar separador
+   - ADICIONADO: campos calculados de data (ano, mes, dia, AAAAMMDD)
+   - ADICIONADO: filtro para incluir ou nao parametros de projeto
+   - ADICIONADO: mover item para o inicio/fim e limpar a sequencia
+   - MELHORADO: janela de montagem migrada para BuildNameWindow.xaml
+     (padrao P-LAB: XAML em arquivo separado, sem arquivo temporario)
+   - ALTERADO: prefixo e sufixo valem apenas no modo simples; no modo
+     montado eles sao desabilitados, substituidos pelo texto fixo
+
    v2.3.0 (2026-03-25):
    - ADICIONADO: Janela "Montar Nome" para composicao personalizada
      com parametros de projeto e informacoes de folha
@@ -38,7 +63,6 @@ import codecs
 import time
 import glob
 import subprocess
-import tempfile
 
 from pyrevit import HOST_APP, framework, forms, revit, DB, script
 
@@ -238,834 +262,614 @@ class PrintUtils:
 
 
 # ==========================================
-# CLASSE: DWGPostProcessor v2.3.0
+# CLASSE: DWGPostProcessor v2.4.0
 # ==========================================
 
 class DWGPostProcessor:
+    u"""Embute as imagens referenciadas nos DWGs, deixando-os autocontidos.
+
+    O Revit exporta logos e carimbos como REFERENCIA externa: o DWG guarda
+    apenas o caminho de um PNG que fica ao lado. Quem recebe so o DWG nao ve
+    a imagem.
+
+    O formato DWG nao tem imagem embutida nativa - a unica forma de colocar
+    os pixels dentro do arquivo e um objeto OLE. Ate a v2.3.0 isso era
+    tentado dirigindo o AutoCAD com um script LISP e a area de transferencia
+    do Windows, o que nunca funcionou: o `ssget` do LISP nao enxerga dentro
+    de definicoes de bloco (e o carimbo do Revit e um bloco), OLE nao pode
+    ser aninhado em bloco, e o clipboard e instavel em processo de segundo
+    plano.
+
+    A partir da v2.4.0 quem faz o trabalho e o `plab-dwg-embed.exe`, escrito
+    em C# sobre a biblioteca ACadSharp. Ele le o DWG, encontra as imagens
+    inclusive dentro dos blocos, converte a posicao pela insercao do bloco,
+    grava um objeto OLE do tipo StaticDib e remove a referencia externa.
+
+    Vantagens sobre a abordagem antiga:
+      - NAO precisa de AutoCAD instalado, nem na nossa maquina nem na do cliente
+      - roda em segundo plano de verdade, sem janela e sem clipboard
+      - StaticDib e renderizado pelo proprio Windows, sem servidor OLE
     """
-    Pos-processamento DWG: embutir imagens raster como OLE via AutoCAD.
 
-    Estrategia:
-      1. Gera script LISP temporario
-      2. AutoCAD (accoreconsole ou acad.exe) executa o LISP
-      3. LISP varre blocos procurando AcDbRasterImage
-      4. Para cada imagem: le posicao local via entget, entra no BEDIT,
-         copia arquivo para Clipboard via PowerShell, cola com PASTECLIP,
-         apaga a imagem original
-      5. QSAVE + QUIT
-    """
+    EXECUTAVEL = "plab-dwg-embed.exe"
 
-    # ------------------------------------------------------------------
-    # Script LISP embutido — sera salvo em arquivo temporario
-    # ------------------------------------------------------------------
-    LISP_SCRIPT = u"""
-; ============================================================
-; embed-images.lsp  -  P-LAB Engenharia  v2.3.0
-; Embute imagens raster como OLE dentro dos blocos do DWG
-; ============================================================
-
-; --- utilidade: copiar arquivo de imagem para o Clipboard via PowerShell ---
-(defun plab-copy-to-clipboard (filepath / cmd)
-  (setq cmd (strcat
-    "powershell -WindowStyle Hidden -Command \\"Add-Type -AssemblyName System.Windows.Forms;"
-    "[System.Windows.Forms.Clipboard]::SetImage("
-    "[System.Drawing.Image]::FromFile('"
-    (vl-string-subst "/" "\\\\" filepath)
-    "'))\\""
-  ))
-  (startapp "cmd.exe" (strcat "/c " cmd))
-  ; aguarda o PowerShell terminar de copiar
-  (command "._delay" 1500)
-)
-
-; --- utilidade: retorna nome do bloco pai de uma entidade ---
-(defun plab-block-name (ent / owner blkname)
-  (setq owner (cdr (assoc 330 (entget ent))))
-  (if owner
-    (setq blkname (cdr (assoc 2 (entget owner))))
-    (setq blkname nil)
-  )
-  blkname
-)
-
-; --- utilidade: verifica se string termina com extensao de imagem ---
-(defun plab-is-image-file (fname)
-  (or
-    (wcmatch (strcase fname) "*.PNG")
-    (wcmatch (strcase fname) "*.JPG")
-    (wcmatch (strcase fname) "*.JPEG")
-    (wcmatch (strcase fname) "*.BMP")
-    (wcmatch (strcase fname) "*.TIF")
-    (wcmatch (strcase fname) "*.TIFF")
-  )
-)
-
-; --- utilidade: resolve caminho absoluto da imagem ---
-; tenta o caminho original, depois relativo ao DWG
-(defun plab-resolve-path (imgpath dwgdir / candidate)
-  (cond
-    ((findfile imgpath) imgpath)
-    (t
-      (setq candidate (strcat dwgdir (vl-filename-base imgpath)
-                              "." (vl-filename-extension imgpath)))
-      (if (findfile candidate) candidate nil)
-    )
-  )
-)
-
-; --- funcao principal ---
-(defun plab-embed-images (/ dwgdir ss idx ent edata imgpath resolved
-                             blkname inspt blknames processed)
-
-  ; diretorio do DWG atual
-  (setq dwgdir (vl-filename-directory (getvar "DWGNAME")))
-  (if (not (= (substr dwgdir (strlen dwgdir)) "\\\\"))
-    (setq dwgdir (strcat dwgdir "\\\\"))
-  )
-
-  (princ "\\n[PLAB] Iniciando embed de imagens...\\n")
-
-  ; coleta todos os objetos AcDbRasterImage no DWG inteiro
-  (setq ss (ssget "_X" '((0 . "IMAGE"))))
-
-  (if (not ss)
-    (progn
-      (princ "\\n[PLAB] Nenhuma imagem raster encontrada.\\n")
-      (exit)
-    )
-  )
-
-  (princ (strcat "\\n[PLAB] " (itoa (sslength ss)) " imagem(ns) encontrada(s).\\n"))
-
-  ; dicionario para agrupar imagens por bloco
-  ; processamos bloco a bloco
-  (setq blknames '())
-  (setq idx 0)
-
-  ; primeira passagem: coleta lista de (bloco . entidade) unicos por bloco
-  (repeat (sslength ss)
-    (setq ent (ssname ss idx))
-    (setq blkname (plab-block-name ent))
-    (if blkname
-      (if (not (assoc blkname blknames))
-        (setq blknames (cons (list blkname) blknames))
-      )
-    )
-    (setq idx (1+ idx))
-  )
-
-  ; segunda passagem: para cada bloco, processa todas as suas imagens
-  (foreach blkentry blknames
-    (setq blkname (car blkentry))
-
-    (princ (strcat "\\n[PLAB] Processando bloco: " blkname "\\n"))
-
-    ; entra no BEDIT do bloco
-    (command "._-bedit" blkname)
-    (command)
-
-    ; coleta imagens dentro deste bloco (no contexto do bedit)
-    (setq processed '())
-    (setq idx 0)
-
-    (repeat (sslength ss)
-      (setq ent (ssname ss idx))
-
-      (if (and ent
-               (equal (plab-block-name ent) blkname)
-               (not (member (cdr (assoc 5 (entget ent))) processed)))
-        (progn
-          (setq edata  (entget ent))
-          (setq inspt  (cdr (assoc 10 edata)))   ; ponto de insercao local
-          (setq imgpath (cdr (assoc 1 edata)))   ; caminho do arquivo
-
-          (princ (strcat "\\n[PLAB]   Imagem: " imgpath "\\n"))
-          (princ (strcat "[PLAB]   Insercao local: "
-                         (rtos (car inspt) 2 6) ", "
-                         (rtos (cadr inspt) 2 6) "\\n"))
-
-          ; resolve o caminho do arquivo
-          (setq resolved (plab-resolve-path imgpath dwgdir))
-
-          (if resolved
-            (progn
-              ; copia imagem para o Clipboard
-              (princ "[PLAB]   Copiando para Clipboard...\\n")
-              (plab-copy-to-clipboard resolved)
-
-              ; cola como OLE no ponto de insercao da imagem original
-              ; (canto inferior esquerdo = ponto 10 da raster image)
-              (command "._pasteclip"
-                       (list (car inspt) (cadr inspt))  ; ponto de insercao
-                       ""                                ; scale = 1 (Enter)
-                       ""                               ; rotation = 0 (Enter)
-              )
-              (princ "[PLAB]   OLE inserido.\\n")
-
-              ; apaga a imagem raster original
-              (entdel ent)
-              (princ "[PLAB]   Imagem raster removida.\\n")
-
-              ; registra como processado
-              (setq processed
-                    (cons (cdr (assoc 5 (entget ent))) processed))
-            )
-            (progn
-              (princ (strcat "[PLAB]   AVISO: arquivo nao encontrado: " imgpath "\\n"))
-            )
-          )
-        )
-      )
-      (setq idx (1+ idx))
-    )
-
-    ; fecha o BEDIT salvando
-    (command "._bclose" "_y")
-    (princ (strcat "\\n[PLAB] Bloco " blkname " salvo.\\n"))
-  )
-
-  (princ "\\n[PLAB] Embed concluido. Salvando DWG...\\n")
-  (command "._qsave")
-  (princ "\\n[PLAB] Concluido!\\n")
-)
-
-; executa ao carregar
-(vl-load-com)
-(plab-embed-images)
-"""
-
-    # ------------------------------------------------------------------
-    # Script de inicializacao .scr — carrega o LISP e sai
-    # ------------------------------------------------------------------
-    SCR_TEMPLATE = u"""(load "{lisp_path}")
-_quit
-y
-"""
-
-    # ------------------------------------------------------------------
-    # Localizacao do executavel AutoCAD
-    # ------------------------------------------------------------------
-    AUTOCAD_SEARCH_PATHS = [
-        # Core Console — versoes comuns
-        r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2025\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2024\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2023\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2022\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2021\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2020\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2019\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2018\accoreconsole.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2017\accoreconsole.exe",
-        # AutoCAD completo como fallback
-        r"C:\Program Files\Autodesk\AutoCAD 2026\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2025\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2024\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2023\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2022\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2021\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2020\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2019\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2018\acad.exe",
-        r"C:\Program Files\Autodesk\AutoCAD 2017\acad.exe",
-    ]
+    # Maior lado da imagem em pixels. O AutoCAD nao renderiza OLE grande de
+    # forma confiavel, e o DIB nao tem compressao: cada pixel custa 4 bytes.
+    MAX_PIXELS = 1600
 
     @staticmethod
-    def find_autocad():
-        """Procura o executavel do AutoCAD nas pastas padrao."""
-        import glob as _glob
-        # Tenta caminhos diretos
-        for path in DWGPostProcessor.AUTOCAD_SEARCH_PATHS:
-            if op.exists(path):
-                return path
-        # Busca generica por glob
-        for pattern in [
-            r"C:\Program Files\Autodesk\AutoCAD*\accoreconsole.exe",
-            r"C:\Program Files\Autodesk\AutoCAD*\acad.exe",
-            r"C:\Program Files (x86)\Autodesk\AutoCAD*\accoreconsole.exe",
-        ]:
-            found = _glob.glob(pattern)
-            if found:
-                # prefere a versao mais recente (maior numero no nome)
-                found.sort(reverse=True)
-                return found[0]
+    def localizar_executavel():
+        u"""Procura o executavel numa pasta 'bin'.
+
+        Primeiro dentro do proprio botao, que e como a versao distribuida
+        instala (o instalador copia paineis inteiros, entao o exe precisa
+        estar dentro do painel). Depois sobe ate a raiz da extensao, que e
+        o layout usado em desenvolvimento.
+        """
+        pasta = op.dirname(__file__)
+        for _ in range(8):
+            candidato = op.join(pasta, "bin", DWGPostProcessor.EXECUTAVEL)
+            if op.exists(candidato):
+                return candidato
+            pai = op.dirname(pasta)
+            if pai == pasta:
+                break
+            pasta = pai
         return None
 
     @staticmethod
     def bind_xref_images_folder(dwg_paths_or_folder, output=None):
-        """Embute imagens raster como OLE nos DWGs indicados.
-        
-        Args:
-            dwg_paths_or_folder: lista de caminhos .dwg OU string de pasta (fallback)
+        u"""Embute as imagens nos DWGs indicados.
+
+        Retorna (quantidade_ok, quantidade_erro).
         """
-
-        if output:
-            output.print_md("")
-            output.print_md("## [BIND] Embutindo Imagens nos DWGs")
-            output.print_md("")
-
-        # Localiza AutoCAD — PRECISA ser acad.exe (Clipboard requer GUI)
-        # O accoreconsole nao tem acesso ao Clipboard do Windows
-        acad_exe = DWGPostProcessor._find_acad_gui()
-        if not acad_exe:
+        def log(msg):
             if output:
-                output.print_md("[ERRO] AutoCAD nao encontrado. Instale o AutoCAD 2017+ para usar esta funcao.")
+                output.print_md(msg)
+
+        log("")
+        log(u"## [BIND] Embutindo imagens nos DWGs")
+        log("")
+
+        exe = DWGPostProcessor.localizar_executavel()
+        if not exe:
+            log(u"[ERRO] `{}` nao encontrado na pasta bin da extensao.".format(
+                DWGPostProcessor.EXECUTAVEL))
             return 0, 1
 
-        if output:
-            output.print_md("AutoCAD encontrado: `{}`".format(acad_exe))
-            output.print_md("Modo: acad.exe em segundo plano (necessario para Clipboard)")
-
-        # Aceita lista de paths ou pasta
         if isinstance(dwg_paths_or_folder, list):
-            dwg_files = [p for p in dwg_paths_or_folder if op.exists(p)]
+            arquivos = [p for p in dwg_paths_or_folder if op.exists(p)]
         else:
-            dwg_files = glob.glob(op.join(dwg_paths_or_folder, "*.dwg"))
+            arquivos = glob.glob(op.join(dwg_paths_or_folder, "*.dwg"))
 
-        if not dwg_files:
-            if output:
-                output.print_md("[AVISO] Nenhum arquivo DWG para processar.")
+        if not arquivos:
+            log(u"[AVISO] Nenhum arquivo DWG para processar.")
             return 0, 0
 
-        if output:
-            output.print_md("Processando {} DWG(s)...".format(len(dwg_files)))
+        log(u"Processando {} DWG(s) sem abrir o AutoCAD...".format(len(arquivos)))
 
-        ok = 0
-        erro = 0
-
-        for dwg_path in dwg_files:
-            dwg_path = op.normpath(op.abspath(dwg_path))
-            nome = op.basename(dwg_path)
-
-            if output:
-                output.print_md("")
-                output.print_md("**{}**".format(nome))
-
-            result = DWGPostProcessor._process_single_dwg(dwg_path, acad_exe, output)
-            if result:
-                ok += 1
-                if output:
-                    output.print_md("[OK] {}".format(nome))
-            else:
-                erro += 1
-                if output:
-                    output.print_md("[ERRO] {}".format(nome))
-
-        if output:
-            output.print_md("")
-            output.print_md("**Resumo: {} OK, {} erros**".format(ok, erro))
-
-        return ok, erro
-
-    @staticmethod
-    def _find_acad_gui():
-        """Procura acad.exe (versao completa com GUI — necessaria para Clipboard)."""
-        import glob as _glob
-        # Tenta caminhos diretos, versoes mais recentes primeiro
-        for path in DWGPostProcessor.AUTOCAD_SEARCH_PATHS:
-            if "acad.exe" in path.lower() and op.exists(path):
-                return path
-        # Busca generica
-        for pattern in [
-            r"C:\Program Files\Autodesk\AutoCAD*\acad.exe",
-            r"C:\Program Files (x86)\Autodesk\AutoCAD*\acad.exe",
-        ]:
-            found = _glob.glob(pattern)
-            if found:
-                found.sort(reverse=True)
-                return found[0]
-        return None
-
-    @staticmethod
-    def _process_single_dwg(dwg_path, acad_exe, output=None):
-        """Processa um unico DWG: gera LISP + SCR temporarios, lanca acad.exe /b, aguarda."""
-
-        lisp_path = None
-        scr_path  = None
-        log_path  = None
+        comando = [exe, "--json", "--max-px", str(DWGPostProcessor.MAX_PIXELS)]
+        comando.extend(arquivos)
 
         try:
-            # --- arquivo de log para debug (o AutoCAD nao tem stdout capturavel) ---
-            log_path = dwg_path.replace('.dwg', '_plab_embed.log')
-
-            # --- script LISP ---
-            lisp_fd   = tempfile.NamedTemporaryFile(suffix='.lsp', delete=False)
-            lisp_path = lisp_fd.name
-            lisp_fd.close()
-
-            lisp_path_fwd = lisp_path.replace('\\', '/')
-            log_path_fwd  = log_path.replace('\\', '/')
-
-            # Injeta o caminho do log no LISP para redirecionar princ
-            lisp_content = DWGPostProcessor.LISP_SCRIPT.replace(
-                "(princ ",
-                "(plab-log "
+            processo = subprocess.Popen(
+                comando,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False
             )
-            # Adiciona funcao de log no inicio do LISP
-            log_func = u"""
-; --- log para arquivo ---
-(defun plab-log (msg / f)
-  (setq f (open "{log}" "a"))
-  (if f (progn (write-line msg f) (close f)))
-  (princ msg)
-)
-""".format(log=log_path_fwd)
-
-            with codecs.open(lisp_path, 'w', encoding='utf-8') as f:
-                f.write(log_func + DWGPostProcessor.LISP_SCRIPT)
-
-            # --- script .scr ---
-            # acad.exe /b executa o .scr apos carregar o DWG
-            # O .scr carrega o LISP e depois fecha o AutoCAD
-            scr_fd   = tempfile.NamedTemporaryFile(suffix='.scr', delete=False)
-            scr_path = scr_fd.name
-            scr_fd.close()
-
-            scr_content = u'(load "{lisp}")\n_quit\ny\n'.format(lisp=lisp_path_fwd)
-
-            with codecs.open(scr_path, 'w', encoding='utf-8') as f:
-                f.write(scr_content)
-
-            # --- limpa log anterior ---
-            try:
-                if op.exists(log_path):
-                    os.remove(log_path)
-            except:
-                pass
-
-            # --- lanca acad.exe em segundo plano ---
-            # /b = batch script executado apos abertura do DWG
-            # /nologo = sem splash screen
-            cmd = '"{acad}" "{dwg}" /b "{scr}" /nologo'.format(
-                acad=acad_exe,
-                dwg=dwg_path,
-                scr=scr_path
-            )
-
-            if output:
-                output.print_md("  Lancando AutoCAD (segundo plano)...")
-                output.print_md("  Cmd: `{}`".format(cmd[:120]))
-
-            proc = subprocess.Popen(
-                cmd,
-                shell=True,
-                creationflags=0x00000020  # DETACHED_PROCESS — nao bloqueia o Revit
-            )
-
-            # Aguarda o AutoCAD terminar (timeout 5 minutos por DWG)
-            timeout = 300
-            intervalo = 5
-            elapsed = 0
-            while elapsed < timeout:
-                time.sleep(intervalo)
-                elapsed += intervalo
-                ret = proc.poll()
-                if ret is not None:
-                    break
-                if output and elapsed % 30 == 0:
-                    output.print_md("  Aguardando... {}s".format(elapsed))
-
-            if proc.poll() is None:
-                proc.kill()
-                if output:
-                    output.print_md("  [TIMEOUT] AutoCAD nao terminou em {}s — processo encerrado.".format(timeout))
-                return False
-
-            # --- le o log gerado pelo LISP ---
-            if output:
-                if op.exists(log_path):
-                    try:
-                        with codecs.open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            for linha in f.readlines():
-                                linha = linha.strip()
-                                if linha:
-                                    output.print_md("  " + linha)
-                    except:
-                        pass
-                else:
-                    output.print_md("  [AVISO] Log nao gerado — o LISP pode nao ter executado.")
-                    output.print_md("  Returncode AutoCAD: {}".format(proc.returncode))
-
-            # Sucesso se o log existe e contem "Concluido"
-            if op.exists(log_path):
-                try:
-                    with codecs.open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        conteudo = f.read()
-                    return "Concluido" in conteudo or "concluido" in conteudo
-                except:
-                    pass
-
-            return proc.returncode == 0
-
+            saida, erro = processo.communicate()
         except Exception as e:
-            if output:
-                output.print_md("  [EXCECAO] {}: {}".format(
-                    op.basename(dwg_path), str(e)))
-            return False
+            log(u"[ERRO] Falha ao executar: {}".format(e))
+            return 0, len(arquivos)
 
-        finally:
-            for f in [lisp_path, scr_path]:
-                if f:
-                    try:
-                        os.remove(f)
-                    except:
-                        pass
-            # Mantem o log para debug — apaga na proxima execucao (feito acima)
+        # O executavel depende do runtime .NET 8. Sem ele o Windows responde
+        # com uma mensagem generica; traduzimos para algo acionavel.
+        if erro and ".NET" in erro and "install" in erro.lower():
+            log(u"[ERRO] O runtime .NET 8 nao esta instalado nesta maquina.")
+            log(u"Baixe em: https://dotnet.microsoft.com/download/dotnet/8.0/runtime")
+            log(u"(reinstalar o P-LAB Tools pelo instalador tambem resolve)")
+            return 0, len(arquivos)
+
+        ok = 0
+        falhas = 0
+        total_imagens = 0
+
+        for linha in (saida or "").splitlines():
+            linha = linha.strip()
+            if not linha or not linha.startswith("{"):
+                continue
+            try:
+                r = json.loads(linha)
+            except Exception:
+                continue
+
+            nome = op.basename(r.get("arquivo", "?"))
+            if not r.get("sucesso"):
+                falhas += 1
+                log(u"[ERRO] {}: {}".format(nome, r.get("erro")))
+            elif r.get("encontradas", 0) == 0:
+                ok += 1
+                log(u"[--] {}: nenhuma imagem referenciada".format(nome))
+            else:
+                ok += 1
+                total_imagens += r.get("embutidas", 0)
+                log(u"[OK] {}: {}/{} imagem(ns) embutida(s)".format(
+                    nome, r.get("embutidas"), r.get("encontradas")))
+
+            for aviso in r.get("avisos") or []:
+                log(u"   aviso: {}".format(aviso))
+
+        if erro:
+            for linha in erro.splitlines():
+                if linha.strip():
+                    log(u"   [stderr] {}".format(linha.strip()))
+
+        log("")
+        log(u"**Resumo: {} arquivo(s) processado(s), {} imagem(ns) embutida(s), {} erro(s)**".format(
+            ok, total_imagens, falhas))
+
+        return ok, falhas
 
 
+# ==========================================
+# TOKENS DA COMPOSICAO DO NOME
+# ==========================================
+#
+# A sequencia do nome (custom_fields) e uma lista ordenada de strings.
+# Cada string e um "token" que pode ser:
+#
+#   "Numero da Prancha"   -> campo interno da folha
+#   "Nome da Prancha"     -> campo interno da folha
+#   "[Projeto] X"         -> parametro X de Informacoes do Projeto
+#   "Qualquer Parametro"  -> parametro de instancia da folha
+#   "TXT:REV01"           -> texto fixo, posicionavel em qualquer lugar
+#   "SEP:_"               -> separador avulso, usado so naquela posicao
+#   "DATA:ano"            -> campo calculado na hora da exportacao
+#
+# Tokens sem prefixo sao os do formato antigo (v2.3.0) - perfis antigos
+# continuam carregando normalmente.
+
+TOKEN_TEXTO = u"TXT:"
+TOKEN_SEP   = u"SEP:"
+TOKEN_DATA  = u"DATA:"
+TOKEN_PROJ  = u"[Projeto] "
+
+CAMPO_NUMERO = u"Numero da Prancha"
+CAMPO_NOME   = u"Nome da Prancha"
+
+# token -> rotulo exibido nas listas
+CAMPOS_DATA = [
+    (TOKEN_DATA + u"ano",  u"Ano (atual)"),
+    (TOKEN_DATA + u"mes",  u"Mes (atual)"),
+    (TOKEN_DATA + u"dia",  u"Dia (atual)"),
+    (TOKEN_DATA + u"data", u"Data completa (AAAAMMDD)"),
+]
+
+INVALID_CHARS = ['\\', '/', ':', '*', '?', '"', '<', '>', '|']
+
+
+def limpar_nome(texto):
+    """Remove caracteres invalidos para nome de arquivo."""
+    if not texto:
+        return u""
+    for c in INVALID_CHARS:
+        texto = texto.replace(c, '_')
+    return texto
+
+
+def valor_data(chave):
+    """Resolve um campo de data calculado na hora da exportacao."""
+    tm = time.localtime()
+    if chave == u"ano":
+        return "{:04d}".format(tm.tm_year)
+    if chave == u"mes":
+        return "{:02d}".format(tm.tm_mon)
+    if chave == u"dia":
+        return "{:02d}".format(tm.tm_mday)
+    if chave == u"data":
+        return "{:04d}{:02d}{:02d}".format(tm.tm_year, tm.tm_mon, tm.tm_mday)
+    return u""
+
+
+def rotulo_token(token):
+    """Texto amigavel exibido nas listas da janela de montagem."""
+    if token.startswith(TOKEN_TEXTO):
+        return u'Texto fixo:  "{}"'.format(token[len(TOKEN_TEXTO):])
+    if token.startswith(TOKEN_SEP):
+        return u'Separador:  "{}"'.format(token[len(TOKEN_SEP):])
+    if token.startswith(TOKEN_DATA):
+        for tok, rotulo in CAMPOS_DATA:
+            if tok == token:
+                return rotulo
+        return token
+    return token
+
+
+def ler_parametro(elemento, nome):
+    """Le um parametro pelo nome e devolve o valor como texto. '' se nao existir."""
+    try:
+        p = elemento.LookupParameter(nome)
+    except:
+        return u""
+    if not p or not p.HasValue:
+        return u""
+    try:
+        if p.StorageType == DB.StorageType.String:
+            return p.AsString() or u""
+        if p.StorageType == DB.StorageType.Integer:
+            return str(p.AsInteger())
+        if p.StorageType == DB.StorageType.Double:
+            # AsValueString respeita as unidades do projeto
+            return p.AsValueString() or str(round(p.AsDouble(), 4))
+    except:
+        pass
+    return u""
+
+
+def resolver_token(sheet, token):
+    """Resolve um token para (tipo, valor).
+
+    tipo 'sep' entra literal no nome, sem separador de campo ao redor.
+    tipo 'val' e um campo comum, separado dos vizinhos pelo separador de campo.
+    """
+    if token.startswith(TOKEN_SEP):
+        return ('sep', token[len(TOKEN_SEP):])
+
+    if token.startswith(TOKEN_TEXTO):
+        return ('val', token[len(TOKEN_TEXTO):])
+
+    if token.startswith(TOKEN_DATA):
+        return ('val', valor_data(token[len(TOKEN_DATA):]))
+
+    if token == CAMPO_NUMERO:
+        return ('val', sheet.SheetNumber or u"SEM_NUMERO")
+
+    if token == CAMPO_NOME:
+        return ('val', sheet.Name or u"SEM_NOME")
+
+    if token.startswith(TOKEN_PROJ):
+        try:
+            return ('val', ler_parametro(doc.ProjectInformation,
+                                         token[len(TOKEN_PROJ):]))
+        except:
+            return ('val', u"")
+
+    return ('val', ler_parametro(sheet, token))
+
+
+def juntar_partes(itens, sep, use_separator):
+    """Junta os itens resolvidos aplicando o separador de campo entre valores.
+
+    itens: lista de (tipo, texto) ja limpos, sem vazios.
+    """
+    partes  = []
+    anterior_foi_valor = False
+    for tipo, texto in itens:
+        if tipo == 'sep':
+            partes.append(texto)
+            anterior_foi_valor = False
+        else:
+            if anterior_foi_valor and use_separator and sep:
+                partes.append(sep)
+            partes.append(texto)
+            anterior_foi_valor = True
+    return u"".join(partes)
 
 
 # ==========================================
 # FUNCAO AUXILIAR
 # ==========================================
 
-def get_param_value(sheet, param_name):
-    """Tenta ler o valor de um parametro da folha ou do projeto pelo nome."""
-    # Tenta primeiro nos parametros da folha
-    param = sheet.LookupParameter(param_name)
-    if param and param.HasValue:
-        if param.StorageType == DB.StorageType.String:
-            return param.AsString() or ""
-        elif param.StorageType == DB.StorageType.Integer:
-            return str(param.AsInteger())
-        elif param.StorageType == DB.StorageType.Double:
-            return str(param.AsDouble())
-    # Tenta nos parametros de informacoes do projeto
-    proj_info = doc.ProjectInformation
-    param = proj_info.LookupParameter(param_name)
-    if param and param.HasValue:
-        if param.StorageType == DB.StorageType.String:
-            return param.AsString() or ""
-        elif param.StorageType == DB.StorageType.Integer:
-            return str(param.AsInteger())
-    return ""
-
-
-def get_available_params(sheet):
-    """Retorna lista de parametros disponiveis (folha + projeto), sem duplicatas."""
+def get_sheet_params(sheet):
+    """Parametros da folha disponiveis para compor o nome. {token: valor_exemplo}"""
     params = {}
+    params[CAMPO_NUMERO] = sheet.SheetNumber or u""
+    params[CAMPO_NOME]   = sheet.Name        or u""
 
-    # Parametros built-in uteis da folha
-    builtins = [
-        ("Numero da Prancha",  "SheetNumber"),
-        ("Nome da Prancha",    "Name"),
-        ("Emitido para revisao", None),
-    ]
-    params["Numero da Prancha"] = sheet.SheetNumber or ""
-    params["Nome da Prancha"]   = sheet.Name        or ""
-
-    # Parametros de instancia da folha
     for p in sheet.Parameters:
         try:
             nome = p.Definition.Name
-            if p.HasValue and nome not in params:
-                if p.StorageType == DB.StorageType.String:
-                    params[nome] = p.AsString() or ""
-                elif p.StorageType == DB.StorageType.Integer:
-                    params[nome] = str(p.AsInteger())
-                elif p.StorageType == DB.StorageType.Double:
-                    params[nome] = str(round(p.AsDouble(), 4))
+            if nome in params:
+                continue
+            if p.StorageType == DB.StorageType.String:
+                params[nome] = p.AsString() or u""
+            elif p.StorageType == DB.StorageType.Integer:
+                params[nome] = str(p.AsInteger())
+            elif p.StorageType == DB.StorageType.Double:
+                params[nome] = p.AsValueString() or str(round(p.AsDouble(), 4))
         except:
             pass
+    return params
 
-    # Parametros de informacoes do projeto
+
+def get_project_params():
+    """Parametros de Informacoes do Projeto. {token: valor_exemplo}"""
+    params = {}
     try:
         proj_info = doc.ProjectInformation
         for p in proj_info.Parameters:
             try:
-                nome = "[Projeto] " + p.Definition.Name
-                if p.HasValue and nome not in params:
-                    if p.StorageType == DB.StorageType.String:
-                        params[nome] = p.AsString() or ""
-                    elif p.StorageType == DB.StorageType.Integer:
-                        params[nome] = str(p.AsInteger())
+                nome = TOKEN_PROJ + p.Definition.Name
+                if nome in params:
+                    continue
+                if p.StorageType == DB.StorageType.String:
+                    params[nome] = p.AsString() or u""
+                elif p.StorageType == DB.StorageType.Integer:
+                    params[nome] = str(p.AsInteger())
             except:
                 pass
     except:
         pass
-
     return params
 
 
 def generate_filename(sheet, prefix="", suffix="", inc_num=True, inc_name=True,
-                      replace_spaces=False, separator="-", custom_fields=None):
-    """Gera nome do arquivo.
-    
+                      replace_spaces=False, separator="-", custom_fields=None,
+                      use_separator=True):
+    """Gera o nome do arquivo de uma prancha.
+
     Args:
-        replace_spaces: Se True, substitui espacos por separador (para DWG/AutoCAD)
-        separator:      Separador entre partes do nome ('-', '_', '.')
-        custom_fields:  Lista de nomes de parametros para compor o nome (substitui inc_num/inc_name)
+        prefix/suffix:  usados APENAS no modo simples (sem custom_fields).
+                        No modo montado, texto fixo entra como token TXT:.
+        inc_num/inc_name: modo simples - incluir numero e/ou nome da prancha.
+        replace_spaces: se True, troca espacos pelo separador (DWG/AutoCAD).
+        separator:      separador de campo. Qualquer texto, nao so '-', '_', '.'.
+        custom_fields:  sequencia de tokens montada pelo usuario.
+        use_separator:  se False, os campos sao concatenados sem separador.
     """
-    sep = separator if separator in ("-", "_", ".") else "-"
+    sep = limpar_nome(separator if separator is not None else u"")
 
-    invalid_chars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|']
-
-    def limpar(s):
-        for c in invalid_chars:
-            s = s.replace(c, '_')
+    def preparar(texto):
+        texto = limpar_nome(texto)
         if replace_spaces:
-            s = s.replace(' ', sep)
-        return s
+            texto = texto.replace(' ', sep if sep else '_')
+        return texto
 
-    prefix = limpar(prefix)
-    suffix = limpar(suffix)
-
-    parts = []
-    if prefix:
-        parts.append(prefix)
+    itens = []
 
     if custom_fields:
-        # Modo avancado: usa lista de parametros escolhidos pelo usuario
-        for campo in custom_fields:
-            if campo == "Numero da Prancha":
-                val = sheet.SheetNumber or "SEM_NUMERO"
-            elif campo == "Nome da Prancha":
-                val = sheet.Name or "SEM_NOME"
-            elif campo.startswith("[Projeto] "):
-                nome_real = campo[len("[Projeto] "):]
-                try:
-                    p = doc.ProjectInformation.LookupParameter(nome_real)
-                    val = (p.AsString() or "") if (p and p.HasValue and p.StorageType == DB.StorageType.String) else ""
-                except:
-                    val = ""
+        # Modo montado: prefixo e sufixo nao se aplicam - o usuario posiciona
+        # o texto fixo onde quiser dentro da propria sequencia.
+        for token in custom_fields:
+            tipo, valor = resolver_token(sheet, token)
+            if tipo == 'sep':
+                valor = limpar_nome(valor)
             else:
-                p = sheet.LookupParameter(campo)
-                if p and p.HasValue:
-                    if p.StorageType == DB.StorageType.String:
-                        val = p.AsString() or ""
-                    elif p.StorageType == DB.StorageType.Integer:
-                        val = str(p.AsInteger())
-                    else:
-                        val = ""
-                else:
-                    val = ""
-            val = limpar(val)
-            if val:
-                parts.append(val)
+                valor = preparar(valor)
+            if valor:
+                itens.append((tipo, valor))
     else:
-        # Modo simples: numero e nome
+        # Modo simples: prefixo + numero + nome + sufixo
+        p = preparar(prefix)
+        if p:
+            itens.append(('val', p))
         if inc_num:
-            parts.append(limpar(sheet.SheetNumber or "SEM_NUMERO"))
+            itens.append(('val', preparar(sheet.SheetNumber or u"SEM_NUMERO")))
         if inc_name:
-            parts.append(limpar(sheet.Name or "SEM_NOME"))
+            itens.append(('val', preparar(sheet.Name or u"SEM_NOME")))
+        s = preparar(suffix)
+        if s:
+            itens.append(('val', s))
+        itens = [it for it in itens if it[1]]
 
-    if suffix:
-        parts.append(suffix)
-
-    return sep.join(parts) if parts else (limpar(sheet.SheetNumber) or "ARQUIVO")
+    nome = juntar_partes(itens, sep, use_separator)
+    if not nome:
+        nome = limpar_nome(sheet.SheetNumber) or u"ARQUIVO"
+    return nome
 
 
 # ==========================================
-# CLASSE: BuildNameWindow (WPF inline)
+# CLASSE: BuildNameWindow (WPF)
 # ==========================================
-
-BUILD_NAME_XAML = u"""
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Montar Nome da Prancha"
-        Width="560" Height="520"
-        ShowInTaskbar="False"
-        ResizeMode="CanResize"
-        WindowStartupLocation="CenterOwner"
-        Background="#F5F5F5">
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-
-        <!-- Cabecalho -->
-        <Border Grid.Row="0" Background="#1976D2" Padding="12,10">
-            <TextBlock Text="Montar Composicao do Nome"
-                      Foreground="White" FontSize="14" FontWeight="Bold"/>
-        </Border>
-
-        <!-- Conteudo -->
-        <Grid Grid.Row="1" Margin="10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-            </Grid.RowDefinitions>
-
-            <!-- Titulos das colunas -->
-            <TextBlock Grid.Row="0" Grid.Column="0"
-                      Text="Parametros disponiveis"
-                      FontWeight="Bold" FontSize="11" Margin="0,0,0,5"/>
-            <TextBlock Grid.Row="0" Grid.Column="2"
-                      Text="Ordem no nome (arraste para reordenar)"
-                      FontWeight="Bold" FontSize="11" Margin="0,0,0,5"/>
-
-            <!-- Lista de parametros -->
-            <Border Grid.Row="1" Grid.Column="0"
-                   BorderBrush="#BDBDBD" BorderThickness="1" CornerRadius="2">
-                <ListBox x:Name="params_lb"
-                        SelectionMode="Single"
-                        FontSize="11"/>
-            </Border>
-
-            <!-- Botoes do meio -->
-            <StackPanel Grid.Row="1" Grid.Column="1"
-                       VerticalAlignment="Center" Margin="8,0">
-                <Button x:Name="add_btn"    Content="Adicionar &#x25BA;" Width="100" Margin="0,4"/>
-                <Button x:Name="remove_btn" Content="&#x25C4; Remover"   Width="100" Margin="0,4"/>
-                <Separator Margin="0,8"/>
-                <Button x:Name="up_btn"     Content="&#x25B2; Subir"     Width="100" Margin="0,4"/>
-                <Button x:Name="down_btn"   Content="&#x25BC; Descer"    Width="100" Margin="0,4"/>
-            </StackPanel>
-
-            <!-- Lista de campos selecionados -->
-            <Border Grid.Row="1" Grid.Column="2"
-                   BorderBrush="#BDBDBD" BorderThickness="1" CornerRadius="2">
-                <ListBox x:Name="selected_lb"
-                        SelectionMode="Single"
-                        FontSize="11"/>
-            </Border>
-        </Grid>
-
-        <!-- Preview -->
-        <Border Grid.Row="2"
-               Margin="10,0,10,5"
-               Padding="10"
-               Background="#E8F5E9"
-               BorderBrush="#4CAF50"
-               BorderThickness="1"
-               CornerRadius="2">
-            <StackPanel>
-                <TextBlock Text="Preview:" FontWeight="Bold" FontSize="10" Foreground="#2E7D32"/>
-                <TextBlock x:Name="preview_tb"
-                          FontFamily="Consolas"
-                          FontSize="11"
-                          Foreground="#1B5E20"
-                          Margin="0,3,0,0"
-                          TextWrapping="Wrap"/>
-            </StackPanel>
-        </Border>
-
-        <!-- Botoes OK/Cancelar -->
-        <Border Grid.Row="3"
-               Background="White"
-               BorderBrush="#BDBDBD"
-               BorderThickness="0,1,0,0"
-               Padding="10">
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button x:Name="ok_btn"
-                       Content="OK"
-                       Background="#4CAF50"
-                       Foreground="White"
-                       FontWeight="Bold"
-                       Width="100"
-                       Margin="5"/>
-                <Button x:Name="cancel_btn"
-                       Content="Cancelar"
-                       Width="100"
-                       Margin="5"/>
-            </StackPanel>
-        </Border>
-    </Grid>
-</Window>
-"""
-
 
 class BuildNameWindow(forms.WPFWindow):
-    """Janela para o usuario montar a composicao do nome da prancha."""
+    """Janela de montagem do nome do arquivo.
 
-    def __init__(self, available_params, current_fields, sample_sheet, separator="-"):
-        # Salvar XAML em arquivo temporario
-        import tempfile, codecs
-        tmp = tempfile.NamedTemporaryFile(suffix='.xaml', delete=False, mode='wb')
-        tmp.write(BUILD_NAME_XAML.encode('utf-8'))
-        tmp.close()
-        self._xaml_tmp = tmp.name
+    A sequencia (self.result_fields) e uma lista ordenada de tokens. O usuario
+    pode intercalar parametros, textos fixos e separadores avulsos, e mover
+    qualquer item para qualquer posicao - inclusive um texto fixo como prefixo
+    ou sufixo.
+    """
 
-        forms.WPFWindow.__init__(self, self._xaml_tmp)
+    SEPARADORES_SUGERIDOS = [u"-", u"_", u".", u" "]
 
-        self.available_params = available_params   # dict {nome: valor_exemplo}
-        self.sample_sheet     = sample_sheet
-        self.separator        = separator
-        self.result_fields    = list(current_fields) if current_fields else []
+    def __init__(self, sheet_params, project_params, current_fields, sample_sheet,
+                 separator=u"-", use_separator=True):
+        forms.WPFWindow.__init__(self, script.get_bundle_file('BuildNameWindow.xaml'))
 
-        self._populate()
+        self.sheet_params   = sheet_params      # {token: valor_exemplo}
+        self.project_params = project_params    # {token: valor_exemplo}
+        self.sample_sheet   = sample_sheet
+        self.result_fields  = list(current_fields) if current_fields else []
+
+        # Se a sequencia carregada ja usa parametros de projeto, mostra a lista deles
+        tem_proj = False
+        for token in self.result_fields:
+            if token.startswith(TOKEN_PROJ):
+                tem_proj = True
+                break
+        self.incluir_projeto_cb.IsChecked = tem_proj
+
+        self._separador_inicial = separator if separator is not None else u"-"
+        self.sep_campo_cb.ItemsSource = list(self.SEPARADORES_SUGERIDOS)
+        if self._separador_inicial in self.SEPARADORES_SUGERIDOS:
+            self.sep_campo_cb.SelectedItem = self._separador_inicial
+        else:
+            self.sep_campo_cb.Text = self._separador_inicial
+
+        self.usar_sep_cb.IsChecked  = bool(use_separator)
+        self.sep_campo_cb.IsEnabled = bool(use_separator)
+
+        self._refresh_lists()
         self._connect_events()
+        # O template do ComboBox editavel so existe apos o Loaded - reaplicar o
+        # texto aqui evita que um separador digitado a mao se perca na abertura.
+        self.Loaded += self._on_loaded
+
+    def _on_loaded(self, sender, args):
+        if self.sep_campo_cb.Text != self._separador_inicial:
+            self.sep_campo_cb.Text = self._separador_inicial
         self._update_preview()
 
-    def _populate(self):
-        # Lista de disponiveis (excluindo os ja selecionados)
-        self.params_lb.ItemsSource = [
-            k for k in sorted(self.available_params.keys())
-            if k not in self.result_fields
-        ]
-        self.selected_lb.ItemsSource = list(self.result_fields)
+    # ---------- estado ----------
+
+    def get_separator(self):
+        texto = self.sep_campo_cb.Text
+        return texto if texto is not None else u""
+
+    def get_use_separator(self):
+        return bool(self.usar_sep_cb.IsChecked)
+
+    def _tokens_disponiveis(self):
+        """Tokens da lista da esquerda, ja ordenados e sem os que estao em uso."""
+        tokens = list(self.sheet_params.keys())
+        if self.incluir_projeto_cb.IsChecked:
+            tokens += list(self.project_params.keys())
+        tokens.sort()
+        # campos calculados sempre no fim da lista
+        tokens += [tok for tok, _ in CAMPOS_DATA]
+        return [t for t in tokens if t not in self.result_fields]
+
+    # ---------- eventos ----------
 
     def _connect_events(self):
-        self.add_btn.Click     += self._on_add
-        self.remove_btn.Click  += self._on_remove
-        self.up_btn.Click      += self._on_up
-        self.down_btn.Click    += self._on_down
-        self.ok_btn.Click      += self._on_ok
-        self.cancel_btn.Click  += self._on_cancel
+        self.add_btn.Click       += self._on_add
+        self.remove_btn.Click    += self._on_remove
+        self.up_btn.Click        += self._on_up
+        self.down_btn.Click      += self._on_down
+        self.topo_btn.Click      += self._on_topo
+        self.fundo_btn.Click     += self._on_fundo
+        self.limpar_btn.Click    += self._on_limpar
+        self.add_texto_btn.Click += self._on_add_texto
+        self.add_sep_btn.Click   += self._on_add_sep
+        self.ok_btn.Click        += self._on_ok
+        self.cancel_btn.Click    += self._on_cancel
+
         self.params_lb.MouseDoubleClick   += self._on_add
         self.selected_lb.MouseDoubleClick += self._on_remove
 
-    def _refresh_lists(self):
-        self.params_lb.ItemsSource = [
-            k for k in sorted(self.available_params.keys())
-            if k not in self.result_fields
-        ]
-        self.selected_lb.ItemsSource = list(self.result_fields)
+        self.incluir_projeto_cb.Checked   += self._on_toggle_projeto
+        self.incluir_projeto_cb.Unchecked += self._on_toggle_projeto
+
+        self.usar_sep_cb.Checked          += self._on_sep_changed
+        self.usar_sep_cb.Unchecked        += self._on_sep_changed
+        self.sep_campo_cb.SelectionChanged += self._on_sep_changed
+        self.sep_campo_cb.KeyUp            += self._on_sep_changed
+
+        self.texto_fixo_tb.KeyUp += self._on_texto_key
+        self.sep_avulso_tb.KeyUp += self._on_sep_avulso_key
+
+    def _on_toggle_projeto(self, sender, args):
+        self._refresh_lists()
+
+    def _on_sep_changed(self, sender, args):
+        self.sep_campo_cb.IsEnabled = self.usar_sep_cb.IsChecked
+        self._update_preview()
+
+    def _on_texto_key(self, sender, args):
+        # Comparacao por texto evita depender do namespace System.Windows.Input
+        try:
+            if str(args.Key) == "Return":
+                self._on_add_texto(sender, args)
+        except:
+            pass
+
+    def _on_sep_avulso_key(self, sender, args):
+        try:
+            if str(args.Key) == "Return":
+                self._on_add_sep(sender, args)
+        except:
+            pass
+
+    # ---------- manipulacao da sequencia ----------
+
+    def _refresh_lists(self, indice_selecionado=-1):
+        self.params_lb.ItemsSource   = [rotulo_token(t) for t in self._tokens_disponiveis()]
+        self.selected_lb.ItemsSource = [rotulo_token(t) for t in self.result_fields]
+        if 0 <= indice_selecionado < len(self.result_fields):
+            self.selected_lb.SelectedIndex = indice_selecionado
         self._update_preview()
 
     def _on_add(self, sender, args):
-        sel = self.params_lb.SelectedItem
-        if sel and sel not in self.result_fields:
-            self.result_fields.append(sel)
-            self._refresh_lists()
+        idx = self.params_lb.SelectedIndex
+        disponiveis = self._tokens_disponiveis()
+        if 0 <= idx < len(disponiveis):
+            self.result_fields.append(disponiveis[idx])
+            self._refresh_lists(len(self.result_fields) - 1)
 
     def _on_remove(self, sender, args):
-        sel = self.selected_lb.SelectedItem
-        if sel in self.result_fields:
-            self.result_fields.remove(sel)
-            self._refresh_lists()
+        idx = self.selected_lb.SelectedIndex
+        if 0 <= idx < len(self.result_fields):
+            self.result_fields.pop(idx)
+            self._refresh_lists(min(idx, len(self.result_fields) - 1))
+
+    def _on_add_texto(self, sender, args):
+        texto = (self.texto_fixo_tb.Text or u"").strip()
+        if not texto:
+            return
+        self.result_fields.append(TOKEN_TEXTO + texto)
+        self.texto_fixo_tb.Text = u""
+        self._refresh_lists(len(self.result_fields) - 1)
+
+    def _on_add_sep(self, sender, args):
+        texto = self.sep_avulso_tb.Text or u""
+        if not texto:
+            return
+        self.result_fields.append(TOKEN_SEP + texto)
+        self.sep_avulso_tb.Text = u""
+        self._refresh_lists(len(self.result_fields) - 1)
+
+    def _mover(self, origem, destino):
+        token = self.result_fields.pop(origem)
+        self.result_fields.insert(destino, token)
+        self._refresh_lists(destino)
 
     def _on_up(self, sender, args):
-        sel = self.selected_lb.SelectedItem
-        if sel and sel in self.result_fields:
-            idx = self.result_fields.index(sel)
-            if idx > 0:
-                self.result_fields[idx], self.result_fields[idx-1] = \
-                    self.result_fields[idx-1], self.result_fields[idx]
-                self._refresh_lists()
-                self.selected_lb.SelectedIndex = idx - 1
+        idx = self.selected_lb.SelectedIndex
+        if idx > 0:
+            self._mover(idx, idx - 1)
 
     def _on_down(self, sender, args):
-        sel = self.selected_lb.SelectedItem
-        if sel and sel in self.result_fields:
-            idx = self.result_fields.index(sel)
-            if idx < len(self.result_fields) - 1:
-                self.result_fields[idx], self.result_fields[idx+1] = \
-                    self.result_fields[idx+1], self.result_fields[idx]
-                self._refresh_lists()
-                self.selected_lb.SelectedIndex = idx + 1
+        idx = self.selected_lb.SelectedIndex
+        if 0 <= idx < len(self.result_fields) - 1:
+            self._mover(idx, idx + 1)
+
+    def _on_topo(self, sender, args):
+        idx = self.selected_lb.SelectedIndex
+        if idx > 0:
+            self._mover(idx, 0)
+
+    def _on_fundo(self, sender, args):
+        idx = self.selected_lb.SelectedIndex
+        if 0 <= idx < len(self.result_fields) - 1:
+            self._mover(idx, len(self.result_fields) - 1)
+
+    def _on_limpar(self, sender, args):
+        self.result_fields = []
+        self._refresh_lists()
+
+    # ---------- preview ----------
 
     def _update_preview(self):
         try:
-            if self.result_fields and self.sample_sheet:
-                nome = generate_filename(
-                    self.sample_sheet,
-                    separator=self.separator,
-                    custom_fields=self.result_fields
-                )
-                self.preview_tb.Text = nome + ".pdf"
-            elif self.sample_sheet:
-                self.preview_tb.Text = "(nenhum campo selecionado)"
+            if not self.sample_sheet:
+                self.preview_tb.Text = u"(nenhuma prancha para exemplo)"
+                return
+            if not self.result_fields:
+                self.preview_tb.Text = u"(sequencia vazia - sera usado Numero + Nome padrao)"
+                return
+            nome = generate_filename(
+                self.sample_sheet,
+                separator=self.get_separator(),
+                custom_fields=self.result_fields,
+                use_separator=self.get_use_separator()
+            )
+            self.preview_tb.Text = nome + u".pdf"
         except Exception as e:
-            self.preview_tb.Text = "Erro: {}".format(e)
+            self.preview_tb.Text = u"Erro: {}".format(e)
+
+    # ---------- fechamento ----------
 
     def _on_ok(self, sender, args):
         self.DialogResult = True
@@ -1074,12 +878,6 @@ class BuildNameWindow(forms.WPFWindow):
     def _on_cancel(self, sender, args):
         self.DialogResult = False
         self.Close()
-
-    def cleanup(self):
-        try:
-            os.remove(self._xaml_tmp)
-        except:
-            pass
 
 
 # ==========================================
@@ -1093,10 +891,12 @@ class ExportSheetsWindow(forms.WPFWindow):
         self.selected_sheets   = selected_sheets
         self.dwg_settings_dict = dwg_settings_dict
         # Estado do construtor de nome
-        self.custom_fields     = []   # [] = modo simples (numero+nome)
+        self.custom_fields    = []     # [] = modo simples (numero + nome)
+        self.custom_separator = None   # None = usa os radios da janela principal
+        self.use_separator    = True
         self._setup_combos()
         self._connect_events()
-        self.update_preview(None, None)
+        self._atualizar_modo_nome()
 
     def _setup_combos(self):
         dwg_names = list(self.dwg_settings_dict.keys()) if self.dwg_settings_dict else ["<Padrao>"]
@@ -1156,16 +956,44 @@ class ExportSheetsWindow(forms.WPFWindow):
             self.bind_images_tip_border.Visibility  = framework.Windows.Visibility.Visible
 
     def _get_separator(self):
+        # No modo montado, o separador escolhido na janela de montagem tem prioridade
+        if self.custom_fields and self.custom_separator is not None:
+            return self.custom_separator
         if self.sep_underline_rb.IsChecked:
             return "_"
         if self.sep_ponto_rb.IsChecked:
             return "."
         return "-"
 
+    def _atualizar_modo_nome(self):
+        """Reflete na interface se o nome esta no modo simples ou no modo montado.
+
+        No modo montado, prefixo e sufixo nao sao usados - o texto fixo entra
+        como item da sequencia, na posicao que o usuario escolher.
+        """
+        montado = bool(self.custom_fields)
+
+        self.include_number_cb.IsEnabled = not montado
+        self.include_name_cb.IsEnabled   = not montado
+        self.prefix_tb.IsEnabled         = not montado
+        self.suffix_tb.IsEnabled         = not montado
+        self.sep_hifen_rb.IsEnabled      = not montado
+        self.sep_underline_rb.IsEnabled  = not montado
+        self.sep_ponto_rb.IsEnabled      = not montado
+
+        if montado:
+            sep = self._get_separator()
+            elo = u" {} ".format(sep) if self.use_separator and sep else u" + "
+            self.nome_formula_tb.Text = elo.join(
+                [rotulo_token(t) for t in self.custom_fields])
+        else:
+            self.nome_formula_tb.Text = u"(usando Numero + Nome padrao)"
+
+        self.update_preview(None, None)
+
     def update_preview(self, sender, args):
         try:
             sheet = self.selected_sheets[0] if self.selected_sheets else None
-            sep   = self._get_separator()
             if sheet:
                 nome = generate_filename(
                     sheet,
@@ -1173,8 +1001,9 @@ class ExportSheetsWindow(forms.WPFWindow):
                     suffix=self.suffix_tb.Text.strip(),
                     inc_num=self.include_number_cb.IsChecked,
                     inc_name=self.include_name_cb.IsChecked,
-                    separator=sep,
-                    custom_fields=self.custom_fields if self.custom_fields else None
+                    separator=self._get_separator(),
+                    custom_fields=self.custom_fields if self.custom_fields else None,
+                    use_separator=self.use_separator
                 )
             else:
                 nome = "ARQUIVO"
@@ -1186,29 +1015,28 @@ class ExportSheetsWindow(forms.WPFWindow):
         try:
             sheet = self.selected_sheets[0] if self.selected_sheets else None
             if not sheet:
-                forms.alert("Nenhuma prancha disponivel para montar o nome.", title="Aviso")
+                forms.alert(u"Nenhuma prancha disponivel para montar o nome.",
+                            title="Aviso")
                 return
-            available = get_available_params(sheet)
-            sep = self._get_separator()
-            win = BuildNameWindow(available, self.custom_fields, sheet, separator=sep)
+
+            win = BuildNameWindow(
+                get_sheet_params(sheet),
+                get_project_params(),
+                self.custom_fields,
+                sheet,
+                separator=self._get_separator(),
+                use_separator=self.use_separator
+            )
             win.Owner = self
             result = win.ShowDialog()
-            win.cleanup()
+
             if result:
-                self.custom_fields = list(win.result_fields)
-                # Atualiza label de formula
-                if self.custom_fields:
-                    self.nome_formula_tb.Text = " {} ".format(sep).join(self.custom_fields)
-                    # Desabilita checkboxes simples pois modo avancado esta ativo
-                    self.include_number_cb.IsEnabled = False
-                    self.include_name_cb.IsEnabled   = False
-                else:
-                    self.nome_formula_tb.Text = "(usando Numero + Nome padrao)"
-                    self.include_number_cb.IsEnabled = True
-                    self.include_name_cb.IsEnabled   = True
-                self.update_preview(None, None)
+                self.custom_fields    = list(win.result_fields)
+                self.custom_separator = win.get_separator() if self.custom_fields else None
+                self.use_separator    = win.get_use_separator()
+                self._atualizar_modo_nome()
         except Exception as e:
-            forms.alert("Erro ao abrir janela: {}".format(e), title="Erro")
+            forms.alert(u"Erro ao abrir janela: {}".format(e), title="Erro")
 
     def save_profile_click(self, sender, args):
         try:
@@ -1227,6 +1055,18 @@ class ExportSheetsWindow(forms.WPFWindow):
         except Exception as e:
             forms.alert("Erro ao carregar perfil:\n{}".format(str(e)), title="Erro")
 
+    def _selecionar_por_tag(self, combo, tag):
+        """Seleciona o ComboBoxItem cujo Tag corresponde. Ignora se nao achar."""
+        if not tag:
+            return
+        try:
+            for item in combo.Items:
+                if item.Tag == tag:
+                    combo.SelectedItem = item
+                    return
+        except Exception:
+            pass
+
     def apply_config(self, config):
         try:
             self.export_pdf_cb.IsChecked        = config.get('export_pdf', True)
@@ -1239,6 +1079,16 @@ class ExportSheetsWindow(forms.WPFWindow):
             self.suffix_tb.Text                 = config.get('file_suffix', '')
             self.include_number_cb.IsChecked    = config.get('include_number', True)
             self.include_name_cb.IsChecked      = config.get('include_name', True)
+
+            # --- separador de campo do modo simples ---
+            sep_salvo = config.get('separator', '-')
+            if sep_salvo == '_':
+                self.sep_underline_rb.IsChecked = True
+            elif sep_salvo == '.':
+                self.sep_ponto_rb.IsChecked = True
+            else:
+                self.sep_hifen_rb.IsChecked = True
+
             if config.get('position_center', True):
                 self.position_center_rb.IsChecked = True
             else:
@@ -1251,10 +1101,51 @@ class ExportSheetsWindow(forms.WPFWindow):
                 self.vector_rb.IsChecked = True
             else:
                 self.raster_rb.IsChecked = True
+
+            # --- qualidade e cores ---
+            quality_tag = config.get('quality_tag', 'high')
+            if config.get('use_vector', True):
+                self._selecionar_por_tag(self.vector_quality_cb, quality_tag)
+            else:
+                self._selecionar_por_tag(self.raster_quality_cb, quality_tag)
+            self._selecionar_por_tag(self.raster_colors_cb, config.get('color_tag', 'color'))
+
+            # --- margens ---
+            margin_x = config.get('margin_x', 0)
+            margin_y = config.get('margin_y', 0)
+            self.margin_x_tb.Text = str(margin_x)
+            self.margin_y_tb.Text = str(margin_y)
+            if not config.get('position_center', True) and (margin_x or margin_y):
+                self._selecionar_por_tag(self.margins_cb, 'custom')
+            else:
+                self._selecionar_por_tag(self.margins_cb, 'none')
+
+            # --- configuracao DWG salva no projeto ---
+            dwg_setup = config.get('dwg_setup')
+            if dwg_setup and dwg_setup in self.dwg_settings_dict:
+                self.dwg_setup_cb.SelectedItem = dwg_setup
+
             self.hide_ref_cb.IsChecked    = config.get('hide_ref_planes', True)
             self.hide_scope_cb.IsChecked  = config.get('hide_scope_boxes', True)
             self.hide_crop_cb.IsChecked   = config.get('hide_crop_boundaries', True)
             self.bind_images_cb.IsChecked = config.get('bind_images', False)
+
+            # --- composicao montada do nome (era o que nao voltava do perfil) ---
+            self.custom_fields = list(config.get('custom_fields') or [])
+            self.use_separator = bool(config.get('use_separator', True))
+            if self.custom_fields:
+                # Perfis da v2.3.0 nao gravavam separador proprio do modo montado
+                self.custom_separator = config.get('custom_separator',
+                                                   config.get('separator', '-'))
+            else:
+                self.custom_separator = None
+
+            # Garante que os paineis condicionais acompanhem o perfil carregado
+            self.processing_changed(None, None)
+            self.position_changed(None, None)
+            self.margins_changed(None, None)
+            self.bind_images_changed(None, None)
+            self._atualizar_modo_nome()
         except Exception as e:
             logger.error("Erro ao aplicar config: %s", e)
 
@@ -1307,6 +1198,8 @@ class ExportSheetsWindow(forms.WPFWindow):
             'include_number':       self.include_number_cb.IsChecked,
             'include_name':         self.include_name_cb.IsChecked,
             'separator':            self._get_separator(),
+            'custom_separator':     self.custom_separator,
+            'use_separator':        self.use_separator,
             'custom_fields':        list(self.custom_fields),
             'hide_ref_planes':      self.hide_ref_cb.IsChecked,
             'hide_scope_boxes':     self.hide_scope_cb.IsChecked,
@@ -1328,7 +1221,7 @@ class ExportSheetsWindow(forms.WPFWindow):
 # MAIN
 # ==========================================
 
-output.print_md("# ExportSheets P-LAB v2.3.0")
+output.print_md("# ExportSheets P-LAB v2.4.0")
 output.print_md("---")
 
 tempo_inicio = time.time()
@@ -1383,6 +1276,20 @@ if not folder:
 
 PrintUtils.ensure_dir(folder)
 
+
+def nome_arquivo(sheet):
+    """Nome da prancha conforme a configuracao escolhida na janela."""
+    return generate_filename(
+        sheet,
+        cfg['file_prefix'],
+        cfg['file_suffix'],
+        cfg['include_number'],
+        cfg['include_name'],
+        separator=cfg.get('separator', '-'),
+        custom_fields=cfg.get('custom_fields') or None,
+        use_separator=cfg.get('use_separator', True)
+    )
+
 output.print_md("---")
 output.print_md("## Configuracoes")
 output.print_md("- Pasta: `{}`".format(folder))
@@ -1404,10 +1311,7 @@ if IS_REVIT_2021_OR_OLDER and cfg['export_pdf']:
             if pb.cancelled:
                 break
             pb.update_progress(idx, len(selected_sheets))
-            filename = generate_filename(sheet, cfg['file_prefix'], cfg['file_suffix'],
-                                         cfg['include_number'], cfg['include_name'],
-                                         separator=cfg.get('separator', '-'),
-                                         custom_fields=cfg.get('custom_fields') or None)
+            filename = nome_arquivo(sheet)
             try:
                 PrintUtils.export_sheet_pdf(pdf_folder, sheet, None, doc, filename + ".pdf")
                 output.print_md("[OK] `{}.pdf`".format(filename))
@@ -1455,10 +1359,7 @@ try:
                     if pb.cancelled:
                         break
                     pb.update_progress(idx, len(selected_sheets))
-                    filename = generate_filename(sheet, cfg['file_prefix'], cfg['file_suffix'],
-                                                 cfg['include_number'], cfg['include_name'],
-                                                 separator=cfg.get('separator', '-'),
-                                                 custom_fields=cfg.get('custom_fields') or None)
+                    filename = nome_arquivo(sheet)
                     try:
                         PrintUtils.export_sheet_pdf(pdf_folder, sheet, pdf_options, doc, filename + ".pdf")
                         output.print_md("[OK] `{}.pdf`".format(filename))
@@ -1491,17 +1392,8 @@ try:
                     break
                 pb.update_progress(idx, len(selected_sheets))
                 
-                filename = generate_filename(
-                    sheet,
-                    cfg['file_prefix'],
-                    cfg['file_suffix'],
-                    cfg['include_number'],
-                    cfg['include_name'],
-                    replace_spaces=True,
-                    separator=cfg.get('separator', '-'),
-                    custom_fields=cfg.get('custom_fields') or None
-                )
-                
+                filename = nome_arquivo(sheet)
+
                 try:
                     PrintUtils.export_sheet_dwg(dwg_folder, sheet, dwg_options, doc, filename + ".dwg")
                     output.print_md("[OK] `{}.dwg`".format(filename))
@@ -1512,7 +1404,7 @@ try:
                     errors += 1
         output.print_md("**Resumo: {} OK, {} erros**".format(success, errors))
 
-        # Vincular imagens — passa lista exata dos DWGs exportados agora
+        # Vincular imagens - passa lista exata dos DWGs exportados agora
         if cfg['bind_images'] and exported_dwg_paths:
             DWGPostProcessor.bind_xref_images_folder(exported_dwg_paths, output)
 
@@ -1528,10 +1420,7 @@ try:
                 if pb.cancelled:
                     break
                 pb.update_progress(idx, len(selected_sheets))
-                filename = generate_filename(sheet, cfg['file_prefix'], cfg['file_suffix'],
-                                             cfg['include_number'], cfg['include_name'],
-                                             separator=cfg.get('separator', '-'),
-                                             custom_fields=cfg.get('custom_fields') or None)
+                filename = nome_arquivo(sheet)
                 try:
                     PrintUtils.export_sheet_dwf(dwf_folder, sheet, dwf_options, doc, filename + ".dwf")
                     output.print_md("[OK] `{}.dwf`".format(filename))

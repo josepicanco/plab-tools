@@ -1,9 +1,9 @@
 {
-  "version": "1.0.0",
-  "data": "2026-03-26",
+  "version": "1.1.0",
+  "data": "2026-08-10",
   "plugins": {
-    "ExportSheets": "1.0.0",
+    "ExportSheets": "2.4.0",
     "ExportSchedules": "1.0.0"
   },
-  "notas": "Versao inicial"
+  "notas": "ExportSheets 2.4.0: montagem do nome por parametros com texto fixo posicionavel, correcao do perfil que nao restaurava a composicao, e imagens embutidas no DWG sem precisar de AutoCAD. Requer o runtime .NET 8."
 }

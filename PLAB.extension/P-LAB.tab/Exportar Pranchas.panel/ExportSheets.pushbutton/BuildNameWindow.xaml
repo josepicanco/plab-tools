@@ -1,0 +1,273 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Montar Nome do Arquivo"
+        Width="760" Height="640"
+        MinWidth="700" MinHeight="560"
+        ShowInTaskbar="False"
+        ResizeMode="CanResize"
+        WindowStartupLocation="CenterOwner"
+        Background="#F5F5F5">
+
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="6,4"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Padding" Value="4,2"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="RotuloSecao" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#7F8C8D"/>
+            <Setter Property="Margin" Value="0,0,0,4"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- CABECALHO -->
+        <Border Grid.Row="0" Background="#2C3E50" Padding="15,12">
+            <StackPanel>
+                <TextBlock Text="Montar Nome do Arquivo"
+                          Foreground="White"
+                          FontSize="16"
+                          FontWeight="Bold"/>
+                <TextBlock Text="Monte a sequencia de campos, textos fixos e separadores na ordem desejada"
+                          Foreground="#BDC3C7"
+                          FontSize="10"
+                          Margin="0,3,0,0"/>
+            </StackPanel>
+        </Border>
+
+        <!-- CONTEUDO -->
+        <Grid Grid.Row="1" Margin="12,10,12,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- ================= COLUNA ESQUERDA ================= -->
+            <TextBlock Grid.Row="0" Grid.Column="0"
+                      Text="Parametros disponiveis"
+                      Style="{StaticResource RotuloSecao}"/>
+
+            <CheckBox Grid.Row="1" Grid.Column="0"
+                     x:Name="incluir_projeto_cb"
+                     Content="Incluir parametros de Informacoes do Projeto"
+                     FontSize="11"
+                     Margin="0,0,0,5"/>
+
+            <Border Grid.Row="2" Grid.Column="0"
+                   BorderBrush="#BDBDBD" BorderThickness="1"
+                   Background="White" CornerRadius="2">
+                <ListBox x:Name="params_lb"
+                        SelectionMode="Single"
+                        BorderThickness="0"
+                        FontSize="11"/>
+            </Border>
+
+            <!-- Texto fixo e separador personalizado -->
+            <StackPanel Grid.Row="3" Grid.Column="0" Margin="0,8,0,0">
+                <TextBlock Text="Texto fixo"
+                          Style="{StaticResource RotuloSecao}"
+                          Margin="0,0,0,2"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0" x:Name="texto_fixo_tb"
+                            ToolTip="Digite um texto (ex: REV01) e clique em + para adiciona-lo a sequencia"/>
+                    <Button Grid.Column="1" x:Name="add_texto_btn"
+                           Content="+"
+                           Width="30" Height="24"
+                           Margin="4,0,0,0"
+                           FontWeight="Bold"
+                           Background="#4CAF50"
+                           Foreground="White"/>
+                </Grid>
+
+                <TextBlock Text="Separador avulso"
+                          Style="{StaticResource RotuloSecao}"
+                          Margin="0,8,0,2"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0" x:Name="sep_avulso_tb"
+                            ToolTip="Separador usado apenas nesta posicao, no lugar do separador de campo"/>
+                    <Button Grid.Column="1" x:Name="add_sep_btn"
+                           Content="+"
+                           Width="30" Height="24"
+                           Margin="4,0,0,0"
+                           FontWeight="Bold"
+                           Background="#4CAF50"
+                           Foreground="White"/>
+                </Grid>
+            </StackPanel>
+
+            <!-- ================= COLUNA DO MEIO ================= -->
+            <StackPanel Grid.Row="2" Grid.Column="1"
+                       VerticalAlignment="Center"
+                       Margin="10,0">
+                <Button x:Name="add_btn"
+                       Content="&#x25BA;"
+                       Width="38" Height="30"
+                       Margin="0,4"
+                       FontSize="14"
+                       ToolTip="Adicionar a sequencia"/>
+                <Button x:Name="remove_btn"
+                       Content="&#x25C4;"
+                       Width="38" Height="30"
+                       Margin="0,4"
+                       FontSize="14"
+                       ToolTip="Remover da sequencia"/>
+            </StackPanel>
+
+            <!-- ================= COLUNA DIREITA ================= -->
+            <TextBlock Grid.Row="0" Grid.Column="2"
+                      Text="Sequencia do nome"
+                      Style="{StaticResource RotuloSecao}"/>
+
+            <Grid Grid.Row="1" Grid.Column="2" Margin="0,0,0,5">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <CheckBox Grid.Column="0"
+                         x:Name="usar_sep_cb"
+                         Content="Separador de campo"
+                         IsChecked="True"
+                         FontSize="11"
+                         VerticalAlignment="Center"/>
+                <ComboBox Grid.Column="1"
+                         x:Name="sep_campo_cb"
+                         IsEditable="True"
+                         Width="60" Height="24"
+                         Margin="8,0,0,0"
+                         VerticalContentAlignment="Center"
+                         ToolTip="Separador padrao entre os campos. Pode digitar outro."/>
+            </Grid>
+
+            <Border Grid.Row="2" Grid.Column="2"
+                   BorderBrush="#BDBDBD" BorderThickness="1"
+                   Background="White" CornerRadius="2">
+                <ListBox x:Name="selected_lb"
+                        SelectionMode="Single"
+                        BorderThickness="0"
+                        FontSize="11"/>
+            </Border>
+
+            <StackPanel Grid.Row="3" Grid.Column="2"
+                       Orientation="Horizontal"
+                       HorizontalAlignment="Center"
+                       Margin="0,8,0,0">
+                <Button x:Name="topo_btn"
+                       Content="&#x21C8;"
+                       Width="38" Height="26" Margin="3,0"
+                       FontSize="13"
+                       ToolTip="Mover para o inicio"/>
+                <Button x:Name="up_btn"
+                       Content="&#x25B2;"
+                       Width="38" Height="26" Margin="3,0"
+                       FontSize="11"
+                       ToolTip="Subir"/>
+                <Button x:Name="down_btn"
+                       Content="&#x25BC;"
+                       Width="38" Height="26" Margin="3,0"
+                       FontSize="11"
+                       ToolTip="Descer"/>
+                <Button x:Name="fundo_btn"
+                       Content="&#x21CA;"
+                       Width="38" Height="26" Margin="3,0"
+                       FontSize="13"
+                       ToolTip="Mover para o fim"/>
+                <Button x:Name="limpar_btn"
+                       Content="&#x21BB;"
+                       Width="38" Height="26" Margin="12,0,3,0"
+                       FontSize="13"
+                       ToolTip="Limpar a sequencia"/>
+            </StackPanel>
+
+        </Grid>
+
+        <!-- PREVIEW -->
+        <Border Grid.Row="2"
+               Margin="12,0,12,8"
+               Padding="10"
+               Background="#E8F5E9"
+               BorderBrush="#4CAF50"
+               BorderThickness="1"
+               CornerRadius="2">
+            <StackPanel>
+                <TextBlock Text="Preview:"
+                          FontWeight="Bold"
+                          FontSize="10"
+                          Foreground="#2E7D32"/>
+                <TextBlock x:Name="preview_tb"
+                          FontFamily="Consolas"
+                          FontSize="12"
+                          Foreground="#1B5E20"
+                          Margin="0,3,0,0"
+                          TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <!-- RODAPE -->
+        <Border Grid.Row="3"
+               Background="White"
+               BorderBrush="#BDBDBD"
+               BorderThickness="0,1,0,0"
+               Padding="12,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0"
+                          Text="Dica: use o texto fixo para revisoes ou siglas e mova-o para qualquer posicao."
+                          FontSize="10"
+                          Foreground="#7F8C8D"
+                          VerticalAlignment="Center"
+                          TextWrapping="Wrap"
+                          Margin="0,0,10,0"/>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button x:Name="ok_btn"
+                           Content="OK"
+                           Background="#4CAF50"
+                           Foreground="White"
+                           FontWeight="Bold"
+                           Width="110"
+                           Padding="20,6"
+                           Margin="5,0"/>
+                    <Button x:Name="cancel_btn"
+                           Content="Cancelar"
+                           Width="110"
+                           Padding="20,6"
+                           Margin="5,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+    </Grid>
+</Window>

@@ -1,0 +1,14 @@
+# Binarios: nunca converter quebras de linha (corromperia o arquivo).
+*.dll  binary
+*.exe  binary
+*.png  binary
+*.ico  binary
+*.jpg  binary
+*.jpeg binary
+
+# Codigo e configuracao: normalizar para LF no repositorio.
+*.py   text eol=lf
+*.xaml text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf

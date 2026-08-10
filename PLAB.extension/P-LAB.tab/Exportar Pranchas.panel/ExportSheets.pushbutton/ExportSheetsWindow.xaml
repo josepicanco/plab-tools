@@ -1,6 +1,6 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="ExportSheets P-LAB v2.3.0" 
+        Title="ExportSheets P-LAB v2.4.0"
         Width="900" Height="700" 
         ShowInTaskbar="False"
         ResizeMode="CanResize"
@@ -166,17 +166,19 @@
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 
-                                <TextBlock Grid.Row="0" Grid.Column="0" 
-                                          Text="Prefixo:" 
+                                <TextBlock Grid.Row="0" Grid.Column="0"
+                                          Text="Prefixo:"
                                           VerticalAlignment="Center"/>
-                                <TextBox Grid.Row="0" Grid.Column="1" 
-                                        x:Name="prefix_tb"/>
-                                
-                                <TextBlock Grid.Row="1" Grid.Column="0" 
-                                          Text="Sufixo:" 
+                                <TextBox Grid.Row="0" Grid.Column="1"
+                                        x:Name="prefix_tb"
+                                        ToolTip="Usado apenas no modo padrao. Ao montar o nome, use o campo Texto fixo — ele pode ir a qualquer posicao."/>
+
+                                <TextBlock Grid.Row="1" Grid.Column="0"
+                                          Text="Sufixo:"
                                           VerticalAlignment="Center"/>
-                                <TextBox Grid.Row="1" Grid.Column="1" 
-                                        x:Name="suffix_tb"/>
+                                <TextBox Grid.Row="1" Grid.Column="1"
+                                        x:Name="suffix_tb"
+                                        ToolTip="Usado apenas no modo padrao. Ao montar o nome, use o campo Texto fixo — ele pode ir a qualquer posicao."/>
                             </Grid>
 
                             <!-- SEPARADOR -->
@@ -502,21 +504,28 @@
                                               FontSize="10"
                                               Foreground="#1B5E20">
                                         <Run FontWeight="Bold" Text="Como funciona:"/>
-                                        <Run Text=" As imagens (logos, carimbos) sao embutidas diretamente dentro do DWG como objetos OLE — o arquivo final e completamente independente, sem necessidade de enviar imagens separadas ao cliente."/>
+                                        <Run Text=" As imagens (logos, carimbos) sao embutidas dentro do DWG como objetos OLE. O arquivo final e independente: o cliente ve os logos sem receber as imagens separadas."/>
                                     </TextBlock>
                                     <TextBlock Margin="0,5,0,0"
                                               TextWrapping="Wrap"
                                               FontSize="10"
                                               Foreground="#2E7D32">
                                         <Run FontWeight="Bold" Text="Processo:"/>
-                                        <Run Text=" O AutoCAD e aberto em segundo plano para processar cada DWG. Dependendo da quantidade de pranchas, esta etapa pode demorar alguns minutos a mais."/>
+                                        <Run Text=" Feito em segundo plano, sem abrir o AutoCAD. Leva poucos segundos por prancha."/>
                                     </TextBlock>
                                     <TextBlock Margin="0,5,0,0"
                                               TextWrapping="Wrap"
                                               FontSize="10"
                                               Foreground="#1565C0">
                                         <Run FontWeight="Bold" Text="Requisito:"/>
-                                        <Run Text=" AutoCAD 2017+ instalado (nao funciona com AutoCAD LT)."/>
+                                        <Run Text=" Nenhum. Nao precisa de AutoCAD instalado, nem aqui nem na maquina do cliente."/>
+                                    </TextBlock>
+                                    <TextBlock Margin="0,5,0,0"
+                                              TextWrapping="Wrap"
+                                              FontSize="10"
+                                              Foreground="#795548">
+                                        <Run FontWeight="Bold" Text="Observacao:"/>
+                                        <Run Text=" imagens muito grandes sao reduzidas para 1600 px no maior lado — objeto OLE nao usa compressao."/>
                                     </TextBlock>
                                 </StackPanel>
                             </Border>
@@ -534,7 +543,7 @@
                                           FontSize="10"
                                           Foreground="#5D4037">
                                     <Run FontWeight="Bold" Text="Dica:"/>
-                                    <Run Text=" Ative esta opcao para que logos e imagens dos carimbos sejam incluidas ao enviar o DWG para o cliente."/>
+                                    <Run Text=" Ative esta opcao para que logos e imagens dos carimbos sejam incluidas ao enviar o DWG para o cliente. O original e preservado como .bak na mesma pasta."/>
                                 </TextBlock>
                             </Border>
 
@@ -602,7 +611,7 @@
                 <TextBlock Grid.Column="2" 
                           HorizontalAlignment="Right"
                           VerticalAlignment="Center">
-                    <Run Text="v2.3.0" 
+                    <Run Text="v2.4.0"
                          Foreground="#95A5A6" 
                          FontSize="9" 
                          FontWeight="Bold"/>
