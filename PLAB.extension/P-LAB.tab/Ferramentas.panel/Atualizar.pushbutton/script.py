@@ -30,7 +30,10 @@ logger = script.get_logger()
 
 # ── CONFIGURACAO ─────────────────────────────────────────────────────────────
 # SUBSTITUA pelo link do seu repositorio quando criar
-GITHUB_USER    = "josepicanco"
+# O repositorio vive na organizacao plab-eng. Ate 08/2026 apontava para a
+# conta pessoal e so funcionava pelo redirecionamento que o GitHub mantem
+# apos a transferencia.
+GITHUB_USER    = "plab-eng"
 GITHUB_REPO    = "plab-tools"
 GITHUB_BRANCH  = "main"
 
