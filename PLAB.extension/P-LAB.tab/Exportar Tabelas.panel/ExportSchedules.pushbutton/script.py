@@ -53,10 +53,19 @@ class ScheduleItem(object):
         self.Selecionada = False
 
 class ModeloItem(object):
-    def __init__(self, caminho):
-        self.Caminho = caminho
-        self.Nome    = os.path.splitext(os.path.basename(caminho))[0]
-        self.Display = os.path.basename(caminho)
+    """Um modelo na lista. Pode vir do disco (copia temporaria) ou ser o
+    documento aberto no Revit (leitura direta, estado ao vivo)."""
+
+    def __init__(self, caminho, aberto=False, titulo=None):
+        self.Caminho = caminho or ''
+        self.Aberto  = bool(aberto)
+        self.Titulo  = titulo or ''
+
+        # Documento nunca salvo nao tem PathName — usa o Title como nome.
+        base = os.path.basename(self.Caminho) if self.Caminho else self.Titulo
+
+        self.Nome    = os.path.splitext(base)[0] or base
+        self.Display = (u"{}   (aberto)".format(base) if self.Aberto else base)
         self.Tabelas = []
 
     def tabelas_selecionadas(self):
@@ -72,6 +81,9 @@ class ExportSchedulesUI(Window):
         wpf.LoadComponent(self, xaml_path)
 
         self.app             = HOST_APP.app
+        # Guardado no __init__: lookup de global dentro de handler WPF
+        # ja causou UnboundNameException neste projeto.
+        self.uiapp           = HOST_APP.uiapp
         self.pasta_destino   = ''
         self._modelos        = []
         self._modelo_atual   = None
@@ -188,8 +200,20 @@ class ExportSchedulesUI(Window):
             return
         novos = 0
         for path in dlg.FileNames:
-            if any(m.Caminho == path for m in self._modelos):
-                self._log("WARN", "Ja adicionado: {}".format(os.path.basename(path)))
+            ja = None
+            for m in self._modelos:
+                if m.Caminho == path:
+                    ja = m
+                    break
+            if ja is not None:
+                if ja.Aberto:
+                    # Mesmo nome de saida .xlsx — o segundo sobrescreveria o primeiro.
+                    self._log("WARN", u"'{}' ja esta na lista como modelo aberto. "
+                                      u"Remova-o antes de adicionar a copia do "
+                                      u"disco.".format(ja.Nome))
+                else:
+                    self._log("WARN", "Ja adicionado: {}".format(
+                        os.path.basename(path)))
                 continue
             self._modelos.append(ModeloItem(path))
             novos += 1
@@ -198,6 +222,51 @@ class ExportSchedulesUI(Window):
         self._atualizar_contador_modelos()
         if novos:
             self._log("OK", "{} modelo(s) adicionado(s).".format(novos))
+
+    def btnAddAberto_Click(self, sender, args):
+        """Adiciona o projeto atualmente ativo no Revit — leitura direta,
+        sem copia temporaria e sem reabrir o documento."""
+        doc = None
+        try:
+            uidoc = self.uiapp.ActiveUIDocument
+            if uidoc is not None:
+                doc = uidoc.Document
+        except Exception:
+            doc = None
+
+        if doc is None:
+            self._log("WARN", u"Nenhum documento ativo no Revit.")
+            return
+
+        try:
+            if doc.IsFamilyDocument:
+                self._log("WARN", u"O documento ativo e uma familia (.rfa). "
+                                  u"Abra um projeto.")
+                return
+        except Exception:
+            pass
+
+        try:    caminho = doc.PathName or ''
+        except: caminho = ''
+        try:    titulo  = doc.Title or ''
+        except: titulo  = ''
+
+        for m in self._modelos:
+            if m.Aberto and ((caminho and m.Caminho == caminho)
+                             or (titulo and m.Titulo == titulo)):
+                self._log("WARN", u"Ja adicionado: {}".format(m.Display))
+                return
+            if (not m.Aberto) and caminho and m.Caminho == caminho:
+                self._log("WARN", u"'{}' ja esta na lista como copia do disco. "
+                                  u"Remova-o antes de adicionar a versao "
+                                  u"aberta.".format(m.Nome))
+                return
+
+        modelo = ModeloItem(caminho, aberto=True, titulo=titulo)
+        self._modelos.append(modelo)
+        self._log("INFO", u"Adicionado: {}".format(modelo.Display))
+        self._carregar_modelo_aberto(modelo)   # instantaneo — so os nomes
+        self._atualizar_contador_modelos()
 
     def btnRemoverModelo_Click(self, sender, args):
         sel = list(self.modelos_lv.SelectedItems)
@@ -241,24 +310,70 @@ class ExportSchedulesUI(Window):
         self._set_progress(100, "Modelos carregados.", "100%")
         self._atualizar_contador_modelos()
 
+    def _coletar_tabelas(self, doc):
+        """Coleta as ViewSchedule exportaveis de um documento, ordenadas.
+        Usado tanto pela copia temporaria quanto pelo documento aberto."""
+        tabelas = []
+        collector = DB.FilteredElementCollector(doc).OfClass(DB.ViewSchedule)
+        for sv in collector:
+            if sv.IsTemplate:
+                continue
+            if hasattr(sv, 'IsTitleblockRevisionSchedule') \
+                    and sv.IsTitleblockRevisionSchedule:
+                continue
+            tabelas.append(ScheduleItem(sv.Name, sv.Id))
+
+        # ORDENACAO ALFABETICA
+        tabelas.sort(key=lambda t: t.Name.lower())
+        return tabelas
+
+    def _resolver_doc_aberto(self, modelo):
+        """Reencontra o Document vivo em app.Documents. Devolve None se o
+        usuario fechou o modelo. Ids nao envelhecem, objetos .NET sim — por
+        isso a referencia e sempre buscada de novo, nunca guardada."""
+        try:
+            for d in self.app.Documents:
+                try:
+                    if d.IsLinked or d.IsFamilyDocument:
+                        continue
+                    if modelo.Caminho and d.PathName == modelo.Caminho:
+                        return d
+                    if modelo.Titulo and d.Title == modelo.Titulo:
+                        return d
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _carregar_modelo_aberto(self, modelo):
+        """Le os nomes das tabelas direto do documento vivo.
+        NAO passa pelo fluxo de disco: nada de Close() no modelo do usuario."""
+        try:
+            doc = self._resolver_doc_aberto(modelo)
+            if doc is None:
+                modelo.Tabelas = []
+                self._log("ERROR", u"'{}' foi fechado ou nao encontrado "
+                                   u"no Revit.".format(modelo.Nome))
+            else:
+                modelo.Tabelas = self._coletar_tabelas(doc)
+                self._log("OK", u"'{}' (aberto) — {} tabelas.".format(
+                    modelo.Nome, len(modelo.Tabelas)))
+        except Exception as ex:
+            self._log("ERROR", u"Falha '{}': {}".format(modelo.Nome, ex))
+        self._refresh_modelos_lv()
+
     def _carregar_modelo(self, modelo):
+        if modelo.Aberto:
+            self._carregar_modelo_aberto(modelo)
+            return
+
         doc_temp  = None
         temp_path = None
         avisos    = []
         try:
             doc_temp, temp_path = self._abrir_documento(modelo.Caminho, avisos)
-            collector = DB.FilteredElementCollector(doc_temp).OfClass(DB.ViewSchedule)
-            tabelas = []
-            for sv in collector:
-                if sv.IsTemplate:
-                    continue
-                if hasattr(sv, 'IsTitleblockRevisionSchedule') \
-                        and sv.IsTitleblockRevisionSchedule:
-                    continue
-                tabelas.append(ScheduleItem(sv.Name, sv.Id))
-
-            # ORDENACAO ALFABETICA
-            tabelas.sort(key=lambda t: t.Name.lower())
+            tabelas = self._coletar_tabelas(doc_temp)
 
             modelo.Tabelas = tabelas
             self._log("OK", "'{}' — {} tabelas.".format(modelo.Nome, len(tabelas)))
@@ -498,6 +613,7 @@ class ExportSchedulesUI(Window):
             os.makedirs(out_dir)
 
         arquivos_gerados = []
+        pulados_abertos  = []
         total_modelos    = len(modelos_para_exportar)
 
         try:
@@ -509,12 +625,27 @@ class ExportSchedulesUI(Window):
                 doc_temp  = None
                 temp_path = None
                 dados     = []
+                eh_aberto = modelo.Aberto
 
                 try:
-                    self._set_progress(pct_base + 2,
-                        "Abrindo {} ({}/{})...".format(
-                            modelo.Nome, idx_m, total_modelos), "")
-                    doc_temp, temp_path = self._abrir_documento(modelo.Caminho)
+                    if eh_aberto:
+                        self._set_progress(pct_base + 2,
+                            "Lendo modelo aberto — {} ({}/{})...".format(
+                                modelo.Nome, idx_m, total_modelos), "")
+                        # Revalida agora: o usuario pode ter fechado o modelo
+                        # entre o clique em '+ Aberto' e o clique em 'Exportar'.
+                        doc_temp = self._resolver_doc_aberto(modelo)
+                        if doc_temp is None:
+                            self._log("ERROR",
+                                u"'{}' foi fechado ou nao encontrado no Revit "
+                                u"— pulado.".format(modelo.Nome))
+                            pulados_abertos.append(modelo.Nome)
+                            continue
+                    else:
+                        self._set_progress(pct_base + 2,
+                            "Abrindo {} ({}/{})...".format(
+                                modelo.Nome, idx_m, total_modelos), "")
+                        doc_temp, temp_path = self._abrir_documento(modelo.Caminho)
 
                     selecionadas = modelo.tabelas_selecionadas()
                     total_tab    = len(selecionadas)
@@ -537,12 +668,14 @@ class ExportSchedulesUI(Window):
                             self._log("ERROR", "Falha '{}': {}".format(
                                 item.Name, str(ex)))
                 finally:
-                    if doc_temp:
-                        try:    doc_temp.Close(False)
-                        except: pass
-                    if temp_path and os.path.exists(temp_path):
-                        try:    os.remove(temp_path)
-                        except: pass
+                    # NUNCA fechar o documento aberto pelo usuario.
+                    if not eh_aberto:
+                        if doc_temp:
+                            try:    doc_temp.Close(False)
+                            except: pass
+                        if temp_path and os.path.exists(temp_path):
+                            try:    os.remove(temp_path)
+                            except: pass
 
                 if not dados:
                     self._log("WARN", "Sem dados: '{}'.".format(modelo.Nome))
@@ -567,12 +700,28 @@ class ExportSchedulesUI(Window):
                 self._set_progress(92, "Mesclando todos os Excel...", "92%")
                 self._mesclar_excels(arquivos_gerados, out_dir, subfolder)
 
+            aviso = u""
+            if pulados_abertos:
+                aviso = u"\nATENCAO — {} modelo(s) pulado(s):\n".format(
+                    len(pulados_abertos))
+                for nome_pulado in pulados_abertos:
+                    aviso += u"  - {} (fechado ou nao encontrado no Revit)\n".format(
+                        nome_pulado)
+
+            if not arquivos_gerados:
+                self._set_progress(0, "Nada exportado.", "")
+                self._log("WARN", "Nenhum arquivo gerado.")
+                MessageBox.Show(
+                    u"Nenhum arquivo Excel foi gerado.\n{}".format(aviso),
+                    "Aviso")
+                return
+
             self._set_progress(100, "Exportacao concluida!", "100%")
             self._log("OK", "{} arquivo(s) gerado(s).".format(len(arquivos_gerados)))
 
             MessageBox.Show(
-                "Exportacao concluida!\n\n{} arquivo(s) Excel gerado(s)\n\nPasta:\n{}".format(
-                    len(arquivos_gerados), out_dir),
+                u"Exportacao concluida!\n\n{} arquivo(s) Excel gerado(s)\n{}\nPasta:\n{}".format(
+                    len(arquivos_gerados), aviso, out_dir),
                 "Concluido")
 
             if self.abrir_pasta_cb.IsChecked == True and os.path.exists(out_dir):

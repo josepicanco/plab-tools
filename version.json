@@ -1,9 +1,9 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "data": "2026-08-10",
   "plugins": {
     "ExportSheets": "2.4.0",
-    "ExportSchedules": "1.0.0"
+    "ExportSchedules": "1.1.0"
   },
-  "notas": "ExportSheets 2.4.0: montagem do nome por parametros com texto fixo posicionavel, correcao do perfil que nao restaurava a composicao, e imagens embutidas no DWG sem precisar de AutoCAD. Requer o runtime .NET 8."
+  "notas": "ExportSheets 2.4.0: montagem do nome por parametros com texto fixo posicionavel, correcao do perfil que nao restaurava a composicao, e imagens embutidas no DWG sem precisar de AutoCAD (requer o runtime .NET 8). ExportSchedules 1.1.0: exporta tambem o projeto aberto no Revit, sem precisar apontar o arquivo em disco."
 }
